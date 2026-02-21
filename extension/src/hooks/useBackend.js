@@ -53,6 +53,10 @@ export function useBackend() {
           setContext(msg.context);
           break;
 
+        case "NANO_STATUS":
+          setNanoAvailable(msg.nanoAvailable || false);
+          break;
+
         default:
           // Dispatch to registered listeners
           const callback = listenersRef.current.get(msg.type);

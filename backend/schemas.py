@@ -20,7 +20,11 @@ class PageVisitRequest(BaseModel):
     title: str
     content: str = Field(
         default="",
-        description="Page body text (truncated by the extension to ~3000 chars)",
+        description="Page body text (sent when Nano is unavailable for backend fallback extraction)",
+    )
+    keywords: Optional[list[str]] = Field(
+        default=None,
+        description="Pre-extracted keywords from Gemini Nano on-device (when available)",
     )
     timestamp: float = Field(
         description="Unix epoch seconds when the page was visited"

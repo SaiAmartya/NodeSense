@@ -104,7 +104,18 @@ class NodeSenseWorkflows:
         return builder.compile()
 
     async def _node_extract_entities(self, state: PageAnalysisState) -> dict:
-        """Node 1: Use LLM to extract topic keywords from page content."""
+        """Node 1: Use pre-extracted Nano keywords or fall back to heuristic.
+
+        If the extension sent pre-extracted keywords (from Gemini Nano),
+        use them directly. Otherwise, fall back to the backend's
+        heuristic extraction from raw content.
+        """
+        existing = state.get("keywords")
+        if existing and len(existing) > 0:
+            # Nano already extracted keywords on-device — skip backend extraction
+            return {"keywords": existing}
+
+        # Fallback: extract from raw content using heuristic
         keywords = await llm_service.extract_entities(
             content=state.get("content", ""),
             title=state.get("title", ""),
@@ -183,20 +194,31 @@ class NodeSenseWorkflows:
     # ── Public API ────────────────────────────────────────────────────────
 
     async def analyze_page(
-        self, url: str, title: str, content: str, timestamp: float | None = None
+        self,
+        url: str,
+        title: str,
+        content: str,
+        timestamp: float | None = None,
+        keywords: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Run the full page-analysis pipeline.
         Returns the final state including active_context.
+
+        If keywords are provided (pre-extracted by Gemini Nano), the
+        extraction node will use them directly instead of running
+        backend-side extraction.
         """
-        result = await self.analyze_graph.ainvoke(
-            {
-                "url": url,
-                "title": title,
-                "content": content,
-                "timestamp": timestamp or time.time(),
-            }
-        )
+        init_state: dict[str, Any] = {
+            "url": url,
+            "title": title,
+            "content": content,
+            "timestamp": timestamp or time.time(),
+        }
+        if keywords:
+            init_state["keywords"] = keywords
+
+        result = await self.analyze_graph.ainvoke(init_state)
         return result
 
     async def chat(self, query: str, session_id: str | None = None) -> dict[str, Any]:

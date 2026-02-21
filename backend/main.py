@@ -105,6 +105,7 @@ async def analyze_page(req: PageVisitRequest):
         title=req.title,
         content=req.content,
         timestamp=req.timestamp,
+        keywords=req.keywords,
     )
 
     ctx = result.get("active_context", {})
@@ -204,6 +205,7 @@ async def websocket_endpoint(ws: WebSocket):
                     title=data.get("title", ""),
                     content=data.get("content", ""),
                     timestamp=data.get("timestamp", time.time()),
+                    keywords=data.get("keywords"),
                 )
                 ctx = result.get("active_context", {})
                 await ws.send_json({"type": "context_update", "context": ctx})
