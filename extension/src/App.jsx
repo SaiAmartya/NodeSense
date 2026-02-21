@@ -80,6 +80,14 @@ export default function App() {
     [sendChat]
   );
 
+  const handleClearChat = useCallback(() => {
+    setMessages([]);
+    setIsLoading(false);
+    if (typeof chrome !== "undefined" && chrome.storage) {
+      chrome.storage.local.remove("chatHistory");
+    }
+  }, []);
+
   return (
     <div className="app">
       <StatusBar
@@ -113,6 +121,7 @@ export default function App() {
 
       <ChatPanel
         onSendMessage={handleSendMessage}
+        onClearChat={handleClearChat}
         messages={messages}
         isLoading={isLoading}
         connected={connected}

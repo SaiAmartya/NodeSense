@@ -309,6 +309,46 @@ body {
   overflow: hidden;
 }
 
+.chat-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.chat-panel__title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.chat-panel__new-chat {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-active);
+  background: var(--accent-dim);
+  color: var(--accent);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.chat-panel__new-chat:hover {
+  background: var(--accent-glow);
+  box-shadow: 0 0 8px var(--accent-dim);
+}
+
+.chat-panel__new-chat:active {
+  transform: scale(0.96);
+}
+
 .chat-panel__messages {
   flex: 1;
   overflow-y: auto;

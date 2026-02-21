@@ -9,6 +9,7 @@ import ReactMarkdown from "react-markdown";
 
 export default function ChatPanel({
   onSendMessage,
+  onClearChat,
   messages,
   isLoading,
   connected,
@@ -39,6 +40,18 @@ export default function ChatPanel({
 
   return (
     <div className="chat-panel">
+      {/* Header with new chat button */}
+      <div className="chat-panel__header">
+        <span className="chat-panel__title">Chat</span>
+        <button
+          className="chat-panel__new-chat"
+          onClick={onClearChat}
+          title="Start a new chat"
+        >
+          + New Chat
+        </button>
+      </div>
+
       <div className="chat-panel__messages">
         {messages.length === 0 ? (
           <div className="empty-state">
