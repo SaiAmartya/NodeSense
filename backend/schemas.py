@@ -26,6 +26,10 @@ class PageVisitRequest(BaseModel):
         default=None,
         description="Pre-extracted keywords from Gemini Nano on-device (when available)",
     )
+    summary: Optional[str] = Field(
+        default=None,
+        description="Pre-generated page summary (when available from Nano)",
+    )
     timestamp: float = Field(
         description="Unix epoch seconds when the page was visited"
     )

@@ -233,6 +233,9 @@ async function processPageVisit(pageData) {
   // ── Extraction strategy ──────────────────────────────────────────────
   // Primary:  Gemini Nano (on-device, free, fast)
   // Fallback: Send raw content → backend heuristic extraction
+  //
+  // ALWAYS send a content snippet (even with Nano keywords) so the
+  // backend can generate a page summary for rich context storage.
   if (nanoAvailable && nanoSession) {
     const keywords = await extractKeywordsWithNano(
       pageData.title,
@@ -240,7 +243,8 @@ async function processPageVisit(pageData) {
     );
     if (keywords) {
       payload.keywords = keywords;
-      payload.content = "";  // no need to send raw content
+      // Send truncated content for summary generation (not full content)
+      payload.content = (pageData.content || "").slice(0, 500);
       console.log("[NodeSense] Nano extracted:", keywords.join(", "));
     } else {
       // Nano failed for this page — fall back to backend extraction

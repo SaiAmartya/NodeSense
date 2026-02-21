@@ -49,11 +49,13 @@ class GraphService:
         title: str,
         keywords: list[str],
         timestamp: float | None = None,
+        summary: str = "",
+        content_snippet: str = "",
     ) -> None:
         """
         Record a page visit by:
-        1. Upserting a URL node
-        2. Upserting keyword nodes
+        1. Upserting a URL node (with summary + content snippet)
+        2. Upserting keyword nodes (with page-context tracking)
         3. Creating/strengthening URL↔keyword edges
         4. Creating/strengthening keyword↔keyword co-occurrence edges
         5. Pruning if graph exceeds MAX_GRAPH_NODES
@@ -65,6 +67,11 @@ class GraphService:
         if self.graph.has_node(url_id):
             self.graph.nodes[url_id]["visit_count"] += 1
             self.graph.nodes[url_id]["last_visited"] = ts
+            # Update summary if a better one is provided
+            if summary:
+                self.graph.nodes[url_id]["summary"] = summary
+            if content_snippet:
+                self.graph.nodes[url_id]["content_snippet"] = content_snippet
         else:
             self.graph.add_node(
                 url_id,
@@ -74,6 +81,8 @@ class GraphService:
                 visit_count=1,
                 first_visited=ts,
                 last_visited=ts,
+                summary=summary,
+                content_snippet=content_snippet,
             )
 
         # --- Keyword nodes + edges ---
@@ -89,6 +98,13 @@ class GraphService:
             if self.graph.has_node(kw_id):
                 self.graph.nodes[kw_id]["frequency"] += 1
                 self.graph.nodes[kw_id]["last_seen"] = ts
+                # Track which pages this keyword appears on (keep latest N)
+                page_refs = self.graph.nodes[kw_id].get("page_refs", [])
+                if url not in page_refs:
+                    page_refs.append(url)
+                    if len(page_refs) > 10:
+                        page_refs = page_refs[-10:]
+                self.graph.nodes[kw_id]["page_refs"] = page_refs
             else:
                 self.graph.add_node(
                     kw_id,
@@ -97,6 +113,7 @@ class GraphService:
                     frequency=1,
                     first_seen=ts,
                     last_seen=ts,
+                    page_refs=[url],
                 )
 
             # URL ↔ keyword edge
@@ -261,6 +278,171 @@ class GraphService:
             seed_nodes.update(frontier)
 
         return self.graph.subgraph(seed_nodes).copy()
+
+    def get_rich_community_context(
+        self,
+        community_idx: int,
+        max_pages: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Build a rich context dict for a community, including:
+          - page summaries (sorted by recency)
+          - keyword relationships with weights
+          - community statistics
+        """
+        if community_idx >= len(self._communities):
+            return {"pages": [], "keyword_relationships": [], "stats": {}}
+
+        max_p = max_pages or settings.MAX_CONTEXT_PAGES
+        community = self._communities[community_idx]
+
+        # --- Page summaries ---
+        page_nodes = [
+            (n, self.graph.nodes[n])
+            for n in community
+            if self.graph.nodes[n].get("type") == "page"
+        ]
+        # Sort by last_visited descending (most recent first)
+        page_nodes.sort(
+            key=lambda x: x[1].get("last_visited", 0), reverse=True
+        )
+
+        pages = []
+        for node_id, data in page_nodes[:max_p]:
+            pages.append({
+                "url": data.get("url", node_id.replace("page:", "")),
+                "title": data.get("title", ""),
+                "summary": data.get("summary", ""),
+                "visit_count": data.get("visit_count", 1),
+                "last_visited": data.get("last_visited", 0),
+            })
+
+        # --- Keyword relationships (top weighted edges within community) ---
+        subgraph = self.graph.subgraph(community)
+        kw_edges = []
+        for u, v, d in subgraph.edges(data=True):
+            u_type = self.graph.nodes[u].get("type", "")
+            v_type = self.graph.nodes[v].get("type", "")
+            if u_type == "keyword" and v_type == "keyword":
+                kw_edges.append({
+                    "from": self.graph.nodes[u].get("label", u),
+                    "to": self.graph.nodes[v].get("label", v),
+                    "weight": round(d.get("weight", 1.0), 2),
+                })
+        kw_edges.sort(key=lambda x: x["weight"], reverse=True)
+
+        # --- Community stats ---
+        kw_nodes = [
+            n for n in community
+            if self.graph.nodes[n].get("type") == "keyword"
+        ]
+
+        return {
+            "pages": pages,
+            "keyword_relationships": kw_edges[:15],
+            "stats": {
+                "total_pages": len(page_nodes),
+                "total_keywords": len(kw_nodes),
+                "total_edges": subgraph.number_of_edges(),
+            },
+        }
+
+    def get_browsing_trajectory(
+        self, max_pages: int | None = None
+    ) -> list[dict[str, Any]]:
+        """
+        Return the most recent page visits across the entire graph,
+        sorted by last_visited descending. Each entry includes
+        title, url, summary, and associated keywords.
+        """
+        max_p = max_pages or settings.MAX_TRAJECTORY_PAGES
+        page_nodes = []
+        for n, data in self.graph.nodes(data=True):
+            if data.get("type") == "page":
+                page_nodes.append((n, data))
+
+        page_nodes.sort(
+            key=lambda x: x[1].get("last_visited", 0), reverse=True
+        )
+
+        trajectory = []
+        now = time.time()
+        for node_id, data in page_nodes[:max_p]:
+            # Get keywords connected to this page
+            connected_kws = []
+            if node_id in self.graph:
+                for neighbor in self.graph.neighbors(node_id):
+                    if self.graph.nodes[neighbor].get("type") == "keyword":
+                        connected_kws.append(
+                            self.graph.nodes[neighbor].get("label", neighbor)
+                        )
+
+            last_visited = data.get("last_visited", now)
+            minutes_ago = max(0, (now - last_visited) / 60.0)
+
+            trajectory.append({
+                "url": data.get("url", node_id.replace("page:", "")),
+                "title": data.get("title", ""),
+                "summary": data.get("summary", ""),
+                "keywords": connected_kws[:5],
+                "minutes_ago": round(minutes_ago, 1),
+                "visit_count": data.get("visit_count", 1),
+            })
+
+        return trajectory
+
+    def get_cross_community_bridges(self) -> list[dict[str, Any]]:
+        """
+        Find keyword nodes that bridge multiple communities.
+        These represent conceptual connections between task clusters.
+        """
+        if len(self._communities) < 2:
+            return []
+
+        # Build node → community index mapping
+        node_community: dict[str, int] = {}
+        for idx, community in enumerate(self._communities):
+            for n in community:
+                node_community[n] = idx
+
+        bridges: list[dict[str, Any]] = []
+        for n in self.graph.nodes:
+            if self.graph.nodes[n].get("type") != "keyword":
+                continue
+            # Find which communities this keyword's neighbors belong to
+            neighbor_communities: set[int] = set()
+            for neighbor in self.graph.neighbors(n):
+                if neighbor in node_community:
+                    neighbor_communities.add(node_community[neighbor])
+
+            own_community = node_community.get(n, -1)
+            neighbor_communities.discard(own_community)
+
+            if neighbor_communities:
+                # This keyword bridges its own community to others
+                bridge_labels = []
+                for c_idx in neighbor_communities:
+                    if c_idx < len(self._community_labels):
+                        bridge_labels.append(
+                            self._community_labels[c_idx].get("label", f"Task {c_idx}")
+                        )
+
+                own_label = ""
+                if own_community >= 0 and own_community < len(self._community_labels):
+                    own_label = self._community_labels[own_community].get(
+                        "label", f"Task {own_community}"
+                    )
+
+                bridges.append({
+                    "keyword": self.graph.nodes[n].get("label", n),
+                    "from_community": own_label,
+                    "bridges_to": bridge_labels,
+                    "edge_count": len(neighbor_communities),
+                })
+
+        # Sort by number of bridges (most connected concepts first)
+        bridges.sort(key=lambda x: x["edge_count"], reverse=True)
+        return bridges[:10]
 
     def find_community_for_keywords(self, keywords: list[str]) -> int | None:
         """
