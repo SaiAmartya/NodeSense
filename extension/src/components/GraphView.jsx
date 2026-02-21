@@ -178,7 +178,7 @@ export default function GraphView({ requestGraph, resetGraph, onMessage }) {
           return 0.3 * Math.sqrt(w);
         });
       fg.d3Force("charge")?.strength(-80);
-      fg.d3ReheatSimulation();
+      // Don't reheat — let the simulation settle and stay still
     }, 100);
     return () => clearTimeout(timer);
   }, [graphData]);
@@ -247,16 +247,17 @@ export default function GraphView({ requestGraph, resetGraph, onMessage }) {
     fg.d3Force("charge")?.strength(-80);
     fg.d3Force("center")?.strength(0.05);
 
-    // Smooth orbit controls
+    // Orbit controls — responsive zoom, no auto-rotation
     const controls = fg.controls();
     if (controls) {
       controls.enableDamping = true;
-      controls.dampingFactor = 0.12;
-      controls.rotateSpeed = 0.6;
-      controls.zoomSpeed = 0.8;
-      controls.panSpeed = 0.5;
-      controls.minDistance = 30;
-      controls.maxDistance = 600;
+      controls.dampingFactor = 0.15;
+      controls.rotateSpeed = 0.8;
+      controls.zoomSpeed = 2.0;
+      controls.panSpeed = 0.6;
+      controls.minDistance = 10;
+      controls.maxDistance = 800;
+      controls.autoRotate = false;
     }
 
     // Initial camera
@@ -568,10 +569,12 @@ export default function GraphView({ requestGraph, resetGraph, onMessage }) {
         linkDirectionalParticleWidth={linkParticleWidth}
         linkDirectionalParticleSpeed={linkParticleSpeed}
         linkDirectionalParticleColor={linkParticleColor}
-        // ── Force engine ──
-        d3AlphaDecay={0.018}
-        d3VelocityDecay={0.25}
-        warmupTicks={40}
+        // ── Force engine (settle fast, then freeze) ──
+        d3AlphaDecay={0.05}
+        d3VelocityDecay={0.4}
+        warmupTicks={80}
+        cooldownTicks={100}
+        cooldownTime={3000}
         // ── Interaction ──
         onNodeHover={handleNodeHover}
         onNodeClick={handleNodeClick}
