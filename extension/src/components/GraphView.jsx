@@ -5,8 +5,16 @@
  * Nodes are colored by community, sized by type/frequency.
  * Edge lengths are inversely proportional to similarity weight —
  * stronger connections pull nodes closer together.
+ *
+ * Features:
+ *   - Hover tooltip showing node metadata (type, community, frequency, edges)
+ *   - Edge weight labels rendered as mid-link sprites
+ *   - Directional particles flowing along edges (speed ∝ weight)
+ *   - Smooth camera fly-to on click with gentle orbit controls
+ *   - Animated ambient star-field particles in background
+ *   - Auto-refreshes graph data every 5 seconds
+ *
  * Navigate: left-drag orbit, right-drag pan, scroll zoom.
- * Auto-refreshes graph data every 5 seconds.
  */
 
 import React, { useRef, useEffect, useState, useCallback, useMemo } from "react";
@@ -37,10 +45,38 @@ const BASE_LINK_DISTANCE = 120;
 const MIN_LINK_DISTANCE = 15;
 
 function weightToDistance(weight) {
-  // Inverse relationship: similarity ∝ 1/distance
-  // Clamp weight to avoid division issues
   const w = Math.max(0.1, Math.min(weight || 1, 10));
   return Math.max(MIN_LINK_DISTANCE, BASE_LINK_DISTANCE / w);
+}
+
+// ── Create a text sprite (reusable helper) ───────────────────────────────
+function makeTextSprite(text, {
+  fontSize = 28,
+  canvasW = 256,
+  canvasH = 48,
+  fillStyle = "#e2e8f0",
+  fontFamily = "'DM Sans', sans-serif",
+  opacity = 0.85,
+} = {}) {
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  canvas.width = canvasW;
+  canvas.height = canvasH;
+  ctx.clearRect(0, 0, canvasW, canvasH);
+  ctx.font = `${fontSize}px ${fontFamily}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = fillStyle;
+  ctx.fillText(text, canvasW / 2, canvasH / 2);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  const mat = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthWrite: false,
+    opacity,
+  });
+  return new THREE.Sprite(mat);
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -48,27 +84,29 @@ function weightToDistance(weight) {
 export default function GraphView({ requestGraph, onMessage }) {
   const fgRef = useRef(null);
   const containerRef = useRef(null);
+  const tooltipRef = useRef(null);
   const [rawData, setRawData] = useState(null);
   const [dimensions, setDimensions] = useState({ width: 400, height: 300 });
+  const [tooltip, setTooltip] = useState(null); // { x, y, node?, link? }
+  const [hoveredNode, setHoveredNode] = useState(null);
 
-  // Request graph data on mount and every 5 seconds
+  // ── Data fetching ──────────────────────────────────────────────────────
+
   useEffect(() => {
     requestGraph();
     const interval = setInterval(requestGraph, 5000);
     return () => clearInterval(interval);
   }, [requestGraph]);
 
-  // Listen for graph data from service worker
   useEffect(() => {
     const cleanup = onMessage("GRAPH_DATA", (msg) => {
-      if (msg.graph) {
-        setRawData(msg.graph);
-      }
+      if (msg.graph) setRawData(msg.graph);
     });
     return cleanup;
   }, [onMessage]);
 
-  // Transform backend data → ForceGraph3D format
+  // ── Transform backend data → ForceGraph3D format ───────────────────────
+
   const graphData = useMemo(() => {
     if (!rawData || !rawData.nodes || rawData.nodes.length === 0) {
       return { nodes: [], links: [] };
@@ -80,10 +118,10 @@ export default function GraphView({ requestGraph, onMessage }) {
       type: n.type || (n.id.startsWith("page:") ? "page" : "keyword"),
       community: n.community ?? -1,
       frequency: n.frequency || 1,
+      visitCount: n.visit_count || 0,
       color: getCommunityColor(n.community ?? -1),
     }));
 
-    // Build a node ID set for validation
     const nodeIds = new Set(nodes.map((n) => n.id));
 
     const links = (rawData.edges || [])
@@ -98,12 +136,24 @@ export default function GraphView({ requestGraph, onMessage }) {
     return { nodes, links };
   }, [rawData]);
 
-  // Re-apply force config when graph data changes
+  // ── Precompute per-node edge counts for tooltip ────────────────────────
+
+  const nodeEdgeCounts = useMemo(() => {
+    const counts = {};
+    for (const link of graphData.links) {
+      const sid = typeof link.source === "object" ? link.source.id : link.source;
+      const tid = typeof link.target === "object" ? link.target.id : link.target;
+      counts[sid] = (counts[sid] || 0) + 1;
+      counts[tid] = (counts[tid] || 0) + 1;
+    }
+    return counts;
+  }, [graphData]);
+
+  // ── Force configuration ────────────────────────────────────────────────
+
   useEffect(() => {
     const fg = fgRef.current;
     if (!fg || graphData.nodes.length === 0) return;
-
-    // Give the engine a tick to initialize, then configure forces
     const timer = setTimeout(() => {
       fg.d3Force("link")
         ?.distance((link) => weightToDistance(link.weight))
@@ -111,17 +161,14 @@ export default function GraphView({ requestGraph, onMessage }) {
           const w = Math.max(0.1, Math.min(link.weight || 1, 10));
           return 0.3 * Math.sqrt(w);
         });
-
-      fg.d3Force("charge")?.strength(-60);
-
-      // Re-heat simulation so new distances apply
+      fg.d3Force("charge")?.strength(-80);
       fg.d3ReheatSimulation();
     }, 100);
-
     return () => clearTimeout(timer);
   }, [graphData]);
 
-  // Resize observer
+  // ── Resize observer ────────────────────────────────────────────────────
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -137,137 +184,302 @@ export default function GraphView({ requestGraph, onMessage }) {
     return () => observer.disconnect();
   }, []);
 
-  // Scene styling + force config on mount
+  // ── Scene setup on mount ───────────────────────────────────────────────
+
   useEffect(() => {
     const fg = fgRef.current;
     if (!fg) return;
 
-    // Dark background matching our UI
     fg.scene().background = new THREE.Color("#0a0e17");
 
-    // Softer ambient + directional lights
+    // Lighting
     const scene = fg.scene();
-    scene.children
-      .filter((c) => c.isLight)
-      .forEach((l) => scene.remove(l));
+    scene.children.filter((c) => c.isLight).forEach((l) => scene.remove(l));
     const ambient = new THREE.AmbientLight(0xcccccc, 1.0);
-    const directional = new THREE.DirectionalLight(0xffffff, 0.6);
-    directional.position.set(100, 200, 150);
-    scene.add(ambient);
-    scene.add(directional);
+    const dir1 = new THREE.DirectionalLight(0xffffff, 0.6);
+    dir1.position.set(100, 200, 150);
+    const dir2 = new THREE.DirectionalLight(0x8888ff, 0.3);
+    dir2.position.set(-150, -100, -100);
+    scene.add(ambient, dir1, dir2);
 
-    // Configure d3 forces — link distance based on weight (similarity)
+    // Star-field background particles
+    const starGeo = new THREE.BufferGeometry();
+    const starCount = 600;
+    const starPositions = new Float32Array(starCount * 3);
+    for (let i = 0; i < starCount * 3; i++) {
+      starPositions[i] = (Math.random() - 0.5) * 1200;
+    }
+    starGeo.setAttribute("position", new THREE.BufferAttribute(starPositions, 3));
+    const starMat = new THREE.PointsMaterial({
+      color: 0x445566,
+      size: 0.6,
+      transparent: true,
+      opacity: 0.5,
+      sizeAttenuation: true,
+    });
+    const stars = new THREE.Points(starGeo, starMat);
+    stars.name = "__nodesense_stars";
+    scene.add(stars);
+
+    // Force config
     fg.d3Force("link")
       ?.distance((link) => weightToDistance(link.weight))
       .strength((link) => {
         const w = Math.max(0.1, Math.min(link.weight || 1, 10));
         return 0.3 * Math.sqrt(w);
       });
-
-    fg.d3Force("charge")?.strength(-60);
+    fg.d3Force("charge")?.strength(-80);
     fg.d3Force("center")?.strength(0.05);
 
-    // Initial camera position
+    // Smooth orbit controls
+    const controls = fg.controls();
+    if (controls) {
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.12;
+      controls.rotateSpeed = 0.6;
+      controls.zoomSpeed = 0.8;
+      controls.panSpeed = 0.5;
+      controls.minDistance = 30;
+      controls.maxDistance = 600;
+    }
+
+    // Initial camera
     fg.cameraPosition({ x: 0, y: 0, z: 250 });
+  }, []);
+
+  // ── Animate star-field slow rotation ───────────────────────────────────
+
+  useEffect(() => {
+    const fg = fgRef.current;
+    if (!fg) return;
+    let frameId;
+    const animate = () => {
+      const scene = fg.scene();
+      const stars = scene.getObjectByName("__nodesense_stars");
+      if (stars) {
+        stars.rotation.y += 0.0001;
+        stars.rotation.x += 0.00005;
+      }
+      frameId = requestAnimationFrame(animate);
+    };
+    frameId = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(frameId);
   }, []);
 
   // ── Node rendering ─────────────────────────────────────────────────────
 
-  const nodeThreeObject = useCallback((node) => {
-    const isPage = node.type === "page";
-    const radius = isPage ? 3.5 : Math.min(2 + node.frequency * 0.4, 6);
-    const color = new THREE.Color(node.color);
+  const nodeThreeObject = useCallback(
+    (node) => {
+      const isPage = node.type === "page";
+      const isHovered = hoveredNode?.id === node.id;
+      const baseRadius = isPage ? 3.5 : Math.min(2 + node.frequency * 0.4, 6);
+      const radius = isHovered ? baseRadius * 1.35 : baseRadius;
+      const color = new THREE.Color(node.color);
 
-    const group = new THREE.Group();
+      const group = new THREE.Group();
 
-    // Core sphere
-    const geometry = new THREE.SphereGeometry(radius, 20, 20);
-    const material = new THREE.MeshPhongMaterial({
-      color,
-      emissive: color,
-      emissiveIntensity: 0.25,
-      shininess: 60,
-      transparent: true,
-      opacity: 0.92,
-    });
-    const sphere = new THREE.Mesh(geometry, material);
-    group.add(sphere);
+      // Core sphere
+      const geo = new THREE.SphereGeometry(radius, 24, 24);
+      const mat = new THREE.MeshPhongMaterial({
+        color,
+        emissive: color,
+        emissiveIntensity: isHovered ? 0.55 : 0.25,
+        shininess: 80,
+        transparent: true,
+        opacity: isHovered ? 1.0 : 0.92,
+      });
+      group.add(new THREE.Mesh(geo, mat));
 
-    // Outer glow ring for page nodes
-    if (isPage) {
-      const ringGeo = new THREE.RingGeometry(radius + 1, radius + 2, 24);
-      const ringMat = new THREE.MeshBasicMaterial({
+      // Outer glow shell
+      const glowGeo = new THREE.SphereGeometry(radius * 1.5, 16, 16);
+      const glowMat = new THREE.MeshBasicMaterial({
         color,
         transparent: true,
-        opacity: 0.2,
-        side: THREE.DoubleSide,
+        opacity: isHovered ? 0.18 : 0.06,
+        side: THREE.BackSide,
       });
-      const ring = new THREE.Mesh(ringGeo, ringMat);
-      group.add(ring);
-    }
+      group.add(new THREE.Mesh(glowGeo, glowMat));
 
-    // Text label (always visible as a sprite)
-    const label = node.label.length > 24 ? node.label.slice(0, 24) + "…" : node.label;
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d");
-    const fontSize = 28;
-    canvas.width = 256;
-    canvas.height = 48;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.font = `${fontSize}px 'DM Sans', sans-serif`;
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#e2e8f0";
-    ctx.fillText(label, canvas.width / 2, fontSize + 4);
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.needsUpdate = true;
-    const spriteMat = new THREE.SpriteMaterial({
-      map: texture,
-      transparent: true,
-      depthWrite: false,
-      opacity: 0.85,
+      // Ring for page nodes
+      if (isPage) {
+        const ringGeo = new THREE.RingGeometry(radius + 1.2, radius + 2.2, 32);
+        const ringMat = new THREE.MeshBasicMaterial({
+          color,
+          transparent: true,
+          opacity: isHovered ? 0.4 : 0.15,
+          side: THREE.DoubleSide,
+        });
+        group.add(new THREE.Mesh(ringGeo, ringMat));
+      }
+
+      // Label sprite
+      const labelText =
+        node.label.length > 22 ? node.label.slice(0, 22) + "…" : node.label;
+      const sprite = makeTextSprite(labelText, {
+        fontSize: 28,
+        fillStyle: isHovered ? "#ffffff" : "#e2e8f0",
+        opacity: isHovered ? 1.0 : 0.8,
+      });
+      sprite.scale.set(24, 4.5, 1);
+      sprite.position.set(0, radius + 4.5, 0);
+      group.add(sprite);
+
+      return group;
+    },
+    [hoveredNode]
+  );
+
+  // ── Link rendering ─────────────────────────────────────────────────────
+
+  const linkThreeObject = useCallback((link) => {
+    // Mid-link weight label sprite
+    const w = link.weight || 1;
+    const label = w.toFixed(2);
+    const sprite = makeTextSprite(label, {
+      fontSize: 22,
+      canvasW: 128,
+      canvasH: 32,
+      fillStyle: "#94a3b8",
+      fontFamily: "'JetBrains Mono', monospace",
+      opacity: 0.7,
     });
-    const sprite = new THREE.Sprite(spriteMat);
-    sprite.scale.set(24, 4.5, 1);
-    sprite.position.set(0, radius + 4, 0);
-    group.add(sprite);
-
-    return group;
+    sprite.scale.set(10, 2.5, 1);
+    return sprite;
   }, []);
 
-  // ── Link styling ───────────────────────────────────────────────────────
+  const linkPositionUpdate = useCallback((sprite, { start, end }) => {
+    // Position label at midpoint of the link
+    const mid = Object.assign(
+      ...["x", "y", "z"].map((c) => ({
+        [c]: start[c] + (end[c] - start[c]) / 2,
+      }))
+    );
+    Object.assign(sprite.position, mid);
+  }, []);
 
   const linkWidth = useCallback((link) => {
-    return Math.max(0.3, Math.min((link.weight || 1) * 0.5, 3));
+    return Math.max(0.4, Math.min((link.weight || 1) * 0.6, 4));
   }, []);
 
   const linkColor = useCallback((link) => {
-    const alpha = Math.min(0.15 + (link.weight || 1) * 0.12, 0.7);
+    const w = Math.min(link.weight || 1, 5);
+    const alpha = Math.min(0.2 + w * 0.14, 0.85);
     return `rgba(148, 163, 184, ${alpha})`;
   }, []);
 
-  // ── Node hover / click ─────────────────────────────────────────────────
-
-  const handleNodeHover = useCallback((node) => {
-    if (containerRef.current) {
-      containerRef.current.style.cursor = node ? "pointer" : "grab";
-    }
+  // Particle config — flowing dots along edges, speed ∝ weight
+  const linkParticles = useCallback((link) => {
+    const w = link.weight || 1;
+    if (w < 0.5) return 0;
+    return Math.min(Math.ceil(w), 4);
   }, []);
 
-  const handleNodeClick = useCallback(
-    (node) => {
-      // Fly camera to clicked node
-      const fg = fgRef.current;
-      if (!fg || !node) return;
-      const distance = 80;
-      const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z);
-      fg.cameraPosition(
-        { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio },
-        node,
-        1200
-      );
+  const linkParticleWidth = useCallback((link) => {
+    return Math.max(0.8, Math.min((link.weight || 1) * 0.4, 2.5));
+  }, []);
+
+  const linkParticleSpeed = useCallback((link) => {
+    const w = Math.max(0.1, link.weight || 1);
+    return 0.003 * w;
+  }, []);
+
+  const linkParticleColor = useCallback((link) => {
+    // Use the source node's community color if available
+    const srcNode =
+      typeof link.source === "object"
+        ? link.source
+        : graphData.nodes.find((n) => n.id === link.source);
+    return srcNode?.color || "#94a3b8";
+  }, [graphData.nodes]);
+
+  // ── Tooltip on hover ───────────────────────────────────────────────────
+
+  const handleNodeHover = useCallback(
+    (node, prevNode) => {
+      if (containerRef.current) {
+        containerRef.current.style.cursor = node ? "pointer" : "grab";
+      }
+      setHoveredNode(node || null);
+      if (!node) {
+        setTooltip(null);
+        return;
+      }
+      // We'll position the tooltip via the DOM overlay, not 3D coords
+      // The actual position is updated in onNodeHover's mouse event
+      const edges = nodeEdgeCounts[node.id] || 0;
+      const communityLabel =
+        rawData?.community_count != null
+          ? `Community ${node.community >= 0 ? node.community : "—"}`
+          : "—";
+      setTooltip({
+        node: {
+          label: node.label,
+          type: node.type === "page" ? "Page" : "Keyword",
+          community: communityLabel,
+          communityIdx: node.community,
+          frequency: node.frequency,
+          visitCount: node.visitCount,
+          edges,
+        },
+      });
     },
-    []
+    [nodeEdgeCounts, rawData]
   );
+
+  const handleLinkHover = useCallback((link) => {
+    if (!link) {
+      setTooltip(null);
+      return;
+    }
+    const srcLabel =
+      typeof link.source === "object"
+        ? link.source.label
+        : link.source.replace(/^(kw:|page:)/, "");
+    const tgtLabel =
+      typeof link.target === "object"
+        ? link.target.label
+        : link.target.replace(/^(kw:|page:)/, "");
+    setTooltip({
+      link: {
+        source: srcLabel,
+        target: tgtLabel,
+        weight: link.weight,
+        baseWeight: link.baseWeight,
+        distance: weightToDistance(link.weight),
+      },
+    });
+  }, []);
+
+  // Track mouse position for tooltip placement
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const handler = (e) => {
+      if (tooltipRef.current) {
+        const rect = container.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        tooltipRef.current.style.left = `${x + 14}px`;
+        tooltipRef.current.style.top = `${y + 14}px`;
+      }
+    };
+    container.addEventListener("mousemove", handler);
+    return () => container.removeEventListener("mousemove", handler);
+  }, []);
+
+  // ── Click → fly-to ─────────────────────────────────────────────────────
+
+  const handleNodeClick = useCallback((node) => {
+    const fg = fgRef.current;
+    if (!fg || !node) return;
+    const distance = 60;
+    const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z || 1);
+    fg.cameraPosition(
+      { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio },
+      node,
+      1500 // longer transition for smoother fly-to
+    );
+  }, []);
 
   // ── Empty state ────────────────────────────────────────────────────────
 
@@ -275,9 +487,13 @@ export default function GraphView({ requestGraph, onMessage }) {
     return (
       <div className="graph-view" ref={containerRef}>
         <div className="graph-view__empty">
-          <span className="graph-view__empty-title">Browse pages to build your graph</span>
+          <span className="graph-view__empty-icon">&loz;</span>
+          <span className="graph-view__empty-title">
+            Knowledge graph is empty
+          </span>
           <span className="graph-view__empty-subtitle">
-            Nodes and edges appear as you browse
+            Browse pages to populate nodes and edges. The graph auto-updates
+            every 5 seconds.
           </span>
         </div>
       </div>
@@ -294,26 +510,127 @@ export default function GraphView({ requestGraph, onMessage }) {
         // ── Node config ──
         nodeThreeObject={nodeThreeObject}
         nodeThreeObjectExtend={false}
+        nodeRelSize={6}
         // ── Link config ──
         linkWidth={linkWidth}
         linkOpacity={1}
         linkColor={linkColor}
-        linkDirectionalParticles={0}
+        linkThreeObject={linkThreeObject}
+        linkThreeObjectExtend={true}
+        linkPositionUpdate={linkPositionUpdate}
+        linkDirectionalParticles={linkParticles}
+        linkDirectionalParticleWidth={linkParticleWidth}
+        linkDirectionalParticleSpeed={linkParticleSpeed}
+        linkDirectionalParticleColor={linkParticleColor}
         // ── Force engine ──
-        d3AlphaDecay={0.02}
-        d3VelocityDecay={0.3}
+        d3AlphaDecay={0.018}
+        d3VelocityDecay={0.25}
+        warmupTicks={40}
         // ── Interaction ──
         onNodeHover={handleNodeHover}
         onNodeClick={handleNodeClick}
+        onLinkHover={handleLinkHover}
         enableNavigationControls={true}
         showNavInfo={false}
         // ── Background ──
         backgroundColor="#0a0e17"
       />
-      {/* Stats overlay */}
+
+      {/* ── Tooltip overlay ── */}
+      {tooltip && (
+        <div
+          ref={tooltipRef}
+          className="graph-tooltip"
+        >
+          {tooltip.node && (
+            <>
+              <div className="graph-tooltip__title">{tooltip.node.label}</div>
+              <div className="graph-tooltip__row">
+                <span className="graph-tooltip__key">Type</span>
+                <span
+                  className="graph-tooltip__val"
+                  style={{
+                    color: getCommunityColor(tooltip.node.communityIdx),
+                  }}
+                >
+                  {tooltip.node.type}
+                </span>
+              </div>
+              <div className="graph-tooltip__row">
+                <span className="graph-tooltip__key">Community</span>
+                <span className="graph-tooltip__val">
+                  {tooltip.node.community}
+                </span>
+              </div>
+              {tooltip.node.type === "Keyword" && (
+                <div className="graph-tooltip__row">
+                  <span className="graph-tooltip__key">Frequency</span>
+                  <span className="graph-tooltip__val">
+                    {tooltip.node.frequency}
+                  </span>
+                </div>
+              )}
+              {tooltip.node.type === "Page" && tooltip.node.visitCount > 0 && (
+                <div className="graph-tooltip__row">
+                  <span className="graph-tooltip__key">Visits</span>
+                  <span className="graph-tooltip__val">
+                    {tooltip.node.visitCount}
+                  </span>
+                </div>
+              )}
+              <div className="graph-tooltip__row">
+                <span className="graph-tooltip__key">Edges</span>
+                <span className="graph-tooltip__val">
+                  {tooltip.node.edges}
+                </span>
+              </div>
+            </>
+          )}
+          {tooltip.link && (
+            <>
+              <div className="graph-tooltip__title graph-tooltip__title--link">
+                {tooltip.link.source}
+                <span className="graph-tooltip__arrow">&harr;</span>
+                {tooltip.link.target}
+              </div>
+              <div className="graph-tooltip__row">
+                <span className="graph-tooltip__key">Decayed weight</span>
+                <span className="graph-tooltip__val graph-tooltip__val--accent">
+                  {tooltip.link.weight.toFixed(3)}
+                </span>
+              </div>
+              <div className="graph-tooltip__row">
+                <span className="graph-tooltip__key">Base weight</span>
+                <span className="graph-tooltip__val">
+                  {tooltip.link.baseWeight.toFixed(1)}
+                </span>
+              </div>
+              <div className="graph-tooltip__row">
+                <span className="graph-tooltip__key">Similarity</span>
+                <span className="graph-tooltip__val graph-tooltip__val--accent">
+                  {Math.min(
+                    (tooltip.link.weight / Math.max(tooltip.link.baseWeight, 1)) * 100,
+                    100
+                  ).toFixed(1)}
+                  %
+                </span>
+              </div>
+              <div className="graph-tooltip__row">
+                <span className="graph-tooltip__key">Link distance</span>
+                <span className="graph-tooltip__val">
+                  {tooltip.link.distance.toFixed(1)}
+                </span>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── Stats bar ── */}
       <div className="graph-view__stats">
-        {graphData.nodes.length} nodes · {graphData.links.length} edges ·{" "}
-        {rawData.community_count || 0} communities
+        <span className="graph-view__stats-dot" /> Live &nbsp;·&nbsp;{" "}
+        {graphData.nodes.length} nodes &nbsp;·&nbsp; {graphData.links.length}{" "}
+        edges &nbsp;·&nbsp; {rawData.community_count || 0} communities
       </div>
     </div>
   );
