@@ -16,6 +16,8 @@ cross-community bridges) for LLM consumption.
 from __future__ import annotations
 
 import time
+import logging
+from collections import deque
 from typing import Any, Dict, List, Optional, Set
 from typing_extensions import TypedDict
 
@@ -25,6 +27,8 @@ from graph_service import GraphService
 from bayesian import BayesianTaskInferrer
 from config import settings
 import llm_service
+
+logger = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -77,6 +81,9 @@ class NodeSenseWorkflows:
     GraphService and BayesianTaskInferrer instances.
     """
 
+    # Maximum number of pipeline runs to keep in history
+    MAX_PIPELINE_HISTORY = 20
+
     def __init__(self, graph_service: GraphService):
         self.gs = graph_service
         self.inferrer = BayesianTaskInferrer()
@@ -87,9 +94,77 @@ class NodeSenseWorkflows:
             "all_tasks": [],
         }
 
+        # ── Pipeline event tracking ──────────────────────────────────────
+        # Each pipeline run is a dict with:
+        #   id, url, title, started_at, completed_at, steps: [...]
+        # Each step: {name, status, started_at, completed_at, duration_ms, output_preview}
+        self._pipeline_runs: deque[dict] = deque(maxlen=self.MAX_PIPELINE_HISTORY)
+        self._current_run: Optional[dict] = None
+
         # Build & compile
         self.analyze_graph = self._build_analysis_workflow()
         self.chat_graph = self._build_chat_workflow()
+
+    # ── Pipeline Event Helpers ────────────────────────────────────────────
+
+    def _start_pipeline_run(self, url: str, title: str) -> None:
+        """Begin tracking a new pipeline run."""
+        self._current_run = {
+            "id": f"run_{int(time.time() * 1000)}",
+            "url": url,
+            "title": title,
+            "started_at": time.time(),
+            "completed_at": None,
+            "status": "running",
+            "steps": [],
+        }
+
+    def _start_step(self, name: str, label: str) -> dict:
+        """Begin tracking a pipeline step."""
+        step = {
+            "name": name,
+            "label": label,
+            "status": "running",
+            "started_at": time.time(),
+            "completed_at": None,
+            "duration_ms": None,
+            "output_preview": None,
+        }
+        if self._current_run:
+            self._current_run["steps"].append(step)
+        return step
+
+    def _complete_step(self, step: dict, output_preview: Any = None, status: str = "completed") -> None:
+        """Mark a pipeline step as completed with output preview."""
+        step["completed_at"] = time.time()
+        step["duration_ms"] = round((step["completed_at"] - step["started_at"]) * 1000, 1)
+        step["status"] = status
+        if output_preview is not None:
+            # Truncate large outputs for the preview
+            if isinstance(output_preview, str) and len(output_preview) > 500:
+                output_preview = output_preview[:500] + "…"
+            step["output_preview"] = output_preview
+
+    def _complete_pipeline_run(self, status: str = "completed") -> None:
+        """Finalize the current pipeline run."""
+        if self._current_run:
+            self._current_run["completed_at"] = time.time()
+            self._current_run["status"] = status
+            self._current_run["duration_ms"] = round(
+                (self._current_run["completed_at"] - self._current_run["started_at"]) * 1000, 1
+            )
+            self._pipeline_runs.append(self._current_run)
+            self._current_run = None
+
+    @property
+    def pipeline_events(self) -> list[dict]:
+        """Return all tracked pipeline runs (most recent first)."""
+        runs = list(self._pipeline_runs)
+        runs.reverse()
+        # Include current run if one is active
+        if self._current_run:
+            runs.insert(0, self._current_run)
+        return runs
 
     # ── Page Analysis Workflow ────────────────────────────────────────────
 
@@ -114,33 +189,34 @@ class NodeSenseWorkflows:
         return builder.compile()
 
     async def _node_extract_entities(self, state: PageAnalysisState) -> dict:
-        """Node 1: Use pre-extracted Nano keywords or fall back to heuristic.
+        """Node 1: Use pre-extracted Nano keywords or fall back to heuristic."""
+        step = self._start_step("extract_entities", "Entity Extraction")
 
-        If the extension sent pre-extracted keywords (from Gemini Nano),
-        use them directly. Otherwise, fall back to the backend's
-        heuristic extraction from raw content.
-        """
         existing = state.get("keywords")
         if existing and len(existing) > 0:
-            # Nano already extracted keywords on-device — skip backend extraction
+            self._complete_step(step, {
+                "source": "nano_pre_extracted",
+                "keywords": existing,
+                "count": len(existing),
+            }, status="completed")
             return {"keywords": existing}
 
-        # Fallback: extract from raw content using heuristic
         keywords = await llm_service.extract_entities(
             content=state.get("content", ""),
             title=state.get("title", ""),
             url=state.get("url", ""),
         )
+        self._complete_step(step, {
+            "source": "heuristic_fallback",
+            "keywords": keywords,
+            "count": len(keywords),
+        })
         return {"keywords": keywords}
 
     async def _node_generate_summary(self, state: PageAnalysisState) -> dict:
-        """Node 2: Generate a page summary from title + content.
+        """Node 2: Generate a page summary from title + content."""
+        step = self._start_step("generate_summary", "Summary Generation")
 
-        If a summary was pre-provided (e.g., from Nano), use it.
-        Otherwise, generate one heuristically from the content.
-        Also prepares a content snippet for storage — uses the full
-        configured MAX_CONTEXT_SNIPPET_LENGTH for comprehensive storage.
-        """
         existing_summary = state.get("summary", "")
         content = state.get("content", "")
         title = state.get("title", "")
@@ -148,6 +224,11 @@ class NodeSenseWorkflows:
         snippet_len = settings.MAX_CONTEXT_SNIPPET_LENGTH
 
         if existing_summary:
+            self._complete_step(step, {
+                "source": "pre_provided",
+                "summary_length": len(existing_summary),
+                "summary_preview": existing_summary[:200],
+            })
             return {
                 "summary": existing_summary,
                 "content_snippet": content[:snippet_len] if content else "",
@@ -156,14 +237,22 @@ class NodeSenseWorkflows:
         summary = llm_service.generate_page_summary(title, content, url)
         content_snippet = content[:snippet_len] if content else ""
 
+        self._complete_step(step, {
+            "source": "heuristic_generated",
+            "summary_length": len(summary),
+            "summary_preview": summary[:200],
+            "snippet_length": len(content_snippet),
+        })
+
         return {"summary": summary, "content_snippet": content_snippet}
 
     async def _node_update_graph(self, state: PageAnalysisState) -> dict:
-        """Node 3: Add the page visit to the NetworkX knowledge graph.
+        """Node 3: Add the page visit to the NetworkX knowledge graph."""
+        step = self._start_step("update_graph", "Graph Update")
 
-        Now stores summary and content snippet on the page node
-        for rich context retrieval during chat.
-        """
+        nodes_before = self.gs.graph.number_of_nodes()
+        edges_before = self.gs.graph.number_of_edges()
+
         self.gs.add_page_visit(
             url=state["url"],
             title=state["title"],
@@ -174,20 +263,49 @@ class NodeSenseWorkflows:
         )
         # Apply temporal decay on every update
         self.gs.apply_temporal_decay()
+
+        nodes_after = self.gs.graph.number_of_nodes()
+        edges_after = self.gs.graph.number_of_edges()
+
+        self._complete_step(step, {
+            "nodes_before": nodes_before,
+            "nodes_after": nodes_after,
+            "nodes_added": nodes_after - nodes_before,
+            "edges_before": edges_before,
+            "edges_after": edges_after,
+            "edges_added": edges_after - edges_before,
+            "page_node": f"page:{state['url'][:80]}",
+            "keyword_nodes": [f"kw:{k}" for k in state.get("keywords", [])[:8]],
+        })
         return {}
 
     async def _node_detect_communities(self, state: PageAnalysisState) -> dict:
         """Node 4: Run Louvain community detection."""
+        step = self._start_step("detect_communities", "Community Detection")
+
         communities = self.gs.detect_communities()
+
+        community_info = []
+        for i, comm in enumerate(communities):
+            cl = self.gs.community_labels[i] if i < len(self.gs.community_labels) else None
+            label = cl.get("label", f"Community {i}") if isinstance(cl, dict) else (cl or f"Community {i}")
+            community_info.append({
+                "index": i,
+                "label": label,
+                "size": len(comm),
+                "sample_nodes": [str(n) for n in list(comm)[:5]],
+            })
+
+        self._complete_step(step, {
+            "community_count": len(communities),
+            "communities": community_info,
+        })
         return {"communities": communities}
 
     async def _node_infer_task(self, state: PageAnalysisState) -> dict:
-        """Node 5: Bayesian inference + rich context assembly.
+        """Node 5: Bayesian inference + rich context assembly."""
+        step = self._start_step("infer_task", "Task Inference")
 
-        Computes posteriors, determines the active task, then assembles
-        deep context including page summaries, browsing trajectory,
-        keyword relationships, and cross-community bridges.
-        """
         communities = state.get("communities", [])
         keywords = state.get("keywords", [])
 
@@ -209,6 +327,24 @@ class NodeSenseWorkflows:
 
         # Cache the latest context for chat queries
         self._cached_context = active_context
+
+        # Build posteriors summary for visualization
+        posteriors_preview = {}
+        for idx, prob in sorted(posteriors.items(), key=lambda x: x[1], reverse=True):
+            cl = self.gs.community_labels[idx] if idx < len(self.gs.community_labels) else None
+            label = cl.get("label", f"Community {idx}") if isinstance(cl, dict) else (cl or f"Community {idx}")
+            posteriors_preview[label] = round(prob, 4)
+
+        self._complete_step(step, {
+            "active_task": active_context.get("task_label", "Exploring"),
+            "confidence": round(active_context.get("confidence", 0.0), 4),
+            "posteriors": posteriors_preview,
+            "trajectory_pages": len(active_context.get("trajectory", [])),
+            "bridge_count": len(active_context.get("bridges", [])),
+        })
+
+        # Mark pipeline run complete
+        self._complete_pipeline_run("completed")
 
         return {"posteriors": posteriors, "active_context": active_context}
 
@@ -312,14 +448,10 @@ class NodeSenseWorkflows:
         """
         Run the full page-analysis pipeline.
         Returns the final state including active_context.
-
-        If keywords are provided (pre-extracted by Gemini Nano), the
-        extraction node will use them directly instead of running
-        backend-side extraction.
-
-        If summary is provided, it will be stored on the page node.
-        Otherwise, one is generated heuristically from the content.
         """
+        # Start pipeline event tracking
+        self._start_pipeline_run(url, title)
+
         init_state: dict[str, Any] = {
             "url": url,
             "title": title,
@@ -331,7 +463,13 @@ class NodeSenseWorkflows:
         if summary:
             init_state["summary"] = summary
 
-        result = await self.analyze_graph.ainvoke(init_state)
+        try:
+            result = await self.analyze_graph.ainvoke(init_state)
+        except Exception as e:
+            logger.error("Pipeline failed: %s", e)
+            self._complete_pipeline_run("failed")
+            raise
+
         return result
 
     async def chat(self, query: str, session_id: str | None = None) -> dict[str, Any]:

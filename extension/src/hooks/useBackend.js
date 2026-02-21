@@ -116,6 +116,10 @@ export function useBackend() {
     sendMessage({ type: "RESET_GRAPH" });
   }, [sendMessage]);
 
+  const requestPipeline = useCallback(() => {
+    sendMessage({ type: "GET_PIPELINE" });
+  }, [sendMessage]);
+
   return {
     connected,
     context,
@@ -124,6 +128,7 @@ export function useBackend() {
     requestContext,
     requestGraph,
     resetGraph,
+    requestPipeline,
     onMessage,
     sendMessage,
   };
