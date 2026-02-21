@@ -521,17 +521,54 @@ body {
 
 .graph-view {
   flex: 1;
-  min-height: 180px;
-  max-height: 280px;
+  min-height: 200px;
+  max-height: 400px;
   position: relative;
   background: var(--bg-primary);
   border-bottom: 1px solid var(--border);
   overflow: hidden;
+  cursor: grab;
 }
 
-.graph-view__canvas {
-  width: 100%;
-  height: 100%;
+.graph-view:active {
+  cursor: grabbing;
+}
+
+.graph-view canvas {
+  width: 100% !important;
+  height: 100% !important;
   display: block;
-  cursor: crosshair;
+  outline: none;
+}
+
+.graph-view__stats {
+  position: absolute;
+  bottom: 6px;
+  left: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  pointer-events: none;
+  z-index: 2;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
+.graph-view__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 8px;
+  text-align: center;
+}
+
+.graph-view__empty-title {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.graph-view__empty-subtitle {
+  font-size: 11px;
+  color: #475569;
 }

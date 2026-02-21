@@ -1,12 +1,17 @@
 /**
  * NodeSense — GraphView Component
  *
- * 2D force-directed knowledge graph visualization using HTML5 Canvas.
- * Shows nodes (colored by community), edges (opacity = weight),
- * labels on hover, and auto-refreshes every 5 seconds.
+ * 3D force-directed knowledge graph visualization using Three.js / WebGL.
+ * Nodes are colored by community, sized by type/frequency.
+ * Edge lengths are inversely proportional to similarity weight —
+ * stronger connections pull nodes closer together.
+ * Navigate: left-drag orbit, right-drag pan, scroll zoom.
+ * Auto-refreshes graph data every 5 seconds.
  */
 
-import React, { useRef, useEffect, useState, useCallback } from "react";
+import React, { useRef, useEffect, useState, useCallback, useMemo } from "react";
+import ForceGraph3D from "react-force-graph-3d";
+import * as THREE from "three";
 
 // ── Community color palette ──────────────────────────────────────────────────
 const COMMUNITY_COLORS = [
@@ -27,92 +32,24 @@ function getCommunityColor(idx) {
   return COMMUNITY_COLORS[idx % COMMUNITY_COLORS.length];
 }
 
-// ── Simple force simulation ──────────────────────────────────────────────────
+// ── Link distance from weight (higher weight = shorter link) ─────────────
+const BASE_LINK_DISTANCE = 120;
+const MIN_LINK_DISTANCE = 15;
 
-function runForceLayout(nodes, edges, width, height, iterations = 80) {
-  if (nodes.length === 0) return [];
-
-  // Initialize positions randomly
-  const positions = nodes.map(() => ({
-    x: width * 0.2 + Math.random() * width * 0.6,
-    y: height * 0.2 + Math.random() * height * 0.6,
-    vx: 0,
-    vy: 0,
-  }));
-
-  const nodeIndex = {};
-  nodes.forEach((n, i) => { nodeIndex[n.id] = i; });
-
-  const repulsion = 800;
-  const attraction = 0.02;
-  const centerForce = 0.01;
-  const damping = 0.85;
-
-  for (let iter = 0; iter < iterations; iter++) {
-    const temp = 1 - iter / iterations; // cooling
-
-    // Repulsion between all nodes
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const dx = positions[i].x - positions[j].x;
-        const dy = positions[i].y - positions[j].y;
-        const dist = Math.sqrt(dx * dx + dy * dy) + 0.1;
-        const force = (repulsion * temp) / (dist * dist);
-        const fx = (dx / dist) * force;
-        const fy = (dy / dist) * force;
-        positions[i].vx += fx;
-        positions[i].vy += fy;
-        positions[j].vx -= fx;
-        positions[j].vy -= fy;
-      }
-    }
-
-    // Attraction along edges
-    for (const edge of edges) {
-      const si = nodeIndex[edge.source];
-      const ti = nodeIndex[edge.target];
-      if (si === undefined || ti === undefined) continue;
-      const dx = positions[ti].x - positions[si].x;
-      const dy = positions[ti].y - positions[si].y;
-      const dist = Math.sqrt(dx * dx + dy * dy) + 0.1;
-      const w = Math.min(edge.weight || 1, 5);
-      const force = attraction * dist * w * temp;
-      const fx = (dx / dist) * force;
-      const fy = (dy / dist) * force;
-      positions[si].vx += fx;
-      positions[si].vy += fy;
-      positions[ti].vx -= fx;
-      positions[ti].vy -= fy;
-    }
-
-    // Center gravity
-    for (let i = 0; i < nodes.length; i++) {
-      positions[i].vx += (width / 2 - positions[i].x) * centerForce;
-      positions[i].vy += (height / 2 - positions[i].y) * centerForce;
-    }
-
-    // Apply velocities with damping
-    for (let i = 0; i < nodes.length; i++) {
-      positions[i].vx *= damping;
-      positions[i].vy *= damping;
-      positions[i].x += positions[i].vx;
-      positions[i].y += positions[i].vy;
-      // Keep within bounds
-      positions[i].x = Math.max(24, Math.min(width - 24, positions[i].x));
-      positions[i].y = Math.max(24, Math.min(height - 24, positions[i].y));
-    }
-  }
-
-  return positions;
+function weightToDistance(weight) {
+  // Inverse relationship: similarity ∝ 1/distance
+  // Clamp weight to avoid division issues
+  const w = Math.max(0.1, Math.min(weight || 1, 10));
+  return Math.max(MIN_LINK_DISTANCE, BASE_LINK_DISTANCE / w);
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function GraphView({ requestGraph, onMessage }) {
-  const canvasRef = useRef(null);
-  const [graphData, setGraphData] = useState(null);
-  const [hoveredNode, setHoveredNode] = useState(null);
-  const layoutRef = useRef(null);
+  const fgRef = useRef(null);
+  const containerRef = useRef(null);
+  const [rawData, setRawData] = useState(null);
+  const [dimensions, setDimensions] = useState({ width: 400, height: 300 });
 
   // Request graph data on mount and every 5 seconds
   useEffect(() => {
@@ -125,169 +62,259 @@ export default function GraphView({ requestGraph, onMessage }) {
   useEffect(() => {
     const cleanup = onMessage("GRAPH_DATA", (msg) => {
       if (msg.graph) {
-        setGraphData(msg.graph);
+        setRawData(msg.graph);
       }
     });
     return cleanup;
   }, [onMessage]);
 
-  // Compute layout when graph data changes
-  useEffect(() => {
-    if (!graphData || !graphData.nodes || graphData.nodes.length === 0) {
-      layoutRef.current = null;
-      return;
+  // Transform backend data → ForceGraph3D format
+  const graphData = useMemo(() => {
+    if (!rawData || !rawData.nodes || rawData.nodes.length === 0) {
+      return { nodes: [], links: [] };
     }
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const w = canvas.width;
-    const h = canvas.height;
-    layoutRef.current = runForceLayout(graphData.nodes, graphData.edges || [], w, h);
+
+    const nodes = rawData.nodes.map((n) => ({
+      id: n.id,
+      label: n.label || n.title || n.id.replace(/^(kw:|page:)/, ""),
+      type: n.type || (n.id.startsWith("page:") ? "page" : "keyword"),
+      community: n.community ?? -1,
+      frequency: n.frequency || 1,
+      color: getCommunityColor(n.community ?? -1),
+    }));
+
+    // Build a node ID set for validation
+    const nodeIds = new Set(nodes.map((n) => n.id));
+
+    const links = (rawData.edges || [])
+      .filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target))
+      .map((e) => ({
+        source: e.source,
+        target: e.target,
+        weight: e.weight || 1,
+        baseWeight: e.base_weight || e.weight || 1,
+      }));
+
+    return { nodes, links };
+  }, [rawData]);
+
+  // Re-apply force config when graph data changes
+  useEffect(() => {
+    const fg = fgRef.current;
+    if (!fg || graphData.nodes.length === 0) return;
+
+    // Give the engine a tick to initialize, then configure forces
+    const timer = setTimeout(() => {
+      fg.d3Force("link")
+        ?.distance((link) => weightToDistance(link.weight))
+        .strength((link) => {
+          const w = Math.max(0.1, Math.min(link.weight || 1, 10));
+          return 0.3 * Math.sqrt(w);
+        });
+
+      fg.d3Force("charge")?.strength(-60);
+
+      // Re-heat simulation so new distances apply
+      fg.d3ReheatSimulation();
+    }, 100);
+
+    return () => clearTimeout(timer);
   }, [graphData]);
 
-  // Draw the graph
+  // Resize observer
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    const w = canvas.width;
-    const h = canvas.height;
-
-    ctx.clearRect(0, 0, w, h);
-
-    if (!graphData || !layoutRef.current || graphData.nodes.length === 0) {
-      // Empty state
-      ctx.fillStyle = "#64748b";
-      ctx.font = "13px 'DM Sans', sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText("Browse pages to build your graph", w / 2, h / 2 - 10);
-      ctx.font = "11px 'DM Sans', sans-serif";
-      ctx.fillStyle = "#475569";
-      ctx.fillText("Nodes and edges appear as you browse", w / 2, h / 2 + 12);
-      return;
-    }
-
-    const positions = layoutRef.current;
-    const nodes = graphData.nodes;
-    const edges = graphData.edges || [];
-    const nodeIndex = {};
-    nodes.forEach((n, i) => { nodeIndex[n.id] = i; });
-
-    // Draw edges
-    for (const edge of edges) {
-      const si = nodeIndex[edge.source];
-      const ti = nodeIndex[edge.target];
-      if (si === undefined || ti === undefined) continue;
-      const weight = Math.min(edge.weight || 1, 5);
-      const alpha = Math.min(0.15 + weight * 0.12, 0.7);
-      ctx.strokeStyle = `rgba(148, 163, 184, ${alpha})`;
-      ctx.lineWidth = Math.max(0.5, Math.min(weight * 0.6, 2.5));
-      ctx.beginPath();
-      ctx.moveTo(positions[si].x, positions[si].y);
-      ctx.lineTo(positions[ti].x, positions[ti].y);
-      ctx.stroke();
-    }
-
-    // Draw nodes
-    for (let i = 0; i < nodes.length; i++) {
-      const node = nodes[i];
-      const pos = positions[i];
-      const isPage = node.type === "page";
-      const color = getCommunityColor(node.community ?? -1);
-      const radius = isPage ? 5 : Math.min(3 + (node.frequency || 1) * 0.5, 8);
-      const isHovered = hoveredNode === i;
-
-      // Glow for hovered node
-      if (isHovered) {
-        ctx.shadowColor = color;
-        ctx.shadowBlur = 12;
-      }
-
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = isHovered ? "#ffffff" : color;
-      ctx.fill();
-
-      if (isPage) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-      }
-
-      ctx.shadowBlur = 0;
-
-      // Label for hovered node or keyword nodes when not too many
-      if (isHovered) {
-        const label = node.label || node.title || node.id.replace(/^(kw:|page:)/, "");
-        const displayLabel = label.length > 30 ? label.slice(0, 30) + "…" : label;
-        ctx.fillStyle = "#e2e8f0";
-        ctx.font = "bold 11px 'DM Sans', sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText(displayLabel, pos.x, pos.y - radius - 6);
-      } else if (!isPage && nodes.length < 40) {
-        // Show labels for keyword nodes on small graphs
-        const label = node.label || node.id.replace("kw:", "");
-        ctx.fillStyle = "#94a3b8";
-        ctx.font = "10px 'DM Sans', sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText(label, pos.x, pos.y + radius + 12);
-      }
-    }
-
-    // Stats overlay
-    ctx.fillStyle = "#64748b";
-    ctx.font = "10px 'JetBrains Mono', monospace";
-    ctx.textAlign = "left";
-    ctx.fillText(`${nodes.length} nodes · ${edges.length} edges · ${graphData.community_count || 0} communities`, 8, h - 8);
-
-  }, [graphData, hoveredNode]);
-
-  // Mouse hover detection
-  const handleMouseMove = useCallback((e) => {
-    if (!layoutRef.current || !graphData) return;
-    const canvas = canvasRef.current;
-    const rect = canvas.getBoundingClientRect();
-    const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const my = (e.clientY - rect.top) * (canvas.height / rect.height);
-
-    let closest = -1;
-    let closestDist = 20; // hover radius in px
-    for (let i = 0; i < layoutRef.current.length; i++) {
-      const dx = layoutRef.current[i].x - mx;
-      const dy = layoutRef.current[i].y - my;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < closestDist) {
-        closestDist = dist;
-        closest = i;
-      }
-    }
-    setHoveredNode(closest >= 0 ? closest : null);
-  }, [graphData]);
-
-  // Resize canvas to container
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const resize = () => {
-      const parent = canvas.parentElement;
-      if (parent) {
-        canvas.width = parent.clientWidth;
-        canvas.height = parent.clientHeight;
-      }
+    const container = containerRef.current;
+    if (!container) return;
+    const measure = () => {
+      setDimensions({
+        width: container.clientWidth,
+        height: container.clientHeight,
+      });
     };
-    resize();
-    const observer = new ResizeObserver(resize);
-    observer.observe(canvas.parentElement);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(container);
     return () => observer.disconnect();
   }, []);
 
+  // Scene styling + force config on mount
+  useEffect(() => {
+    const fg = fgRef.current;
+    if (!fg) return;
+
+    // Dark background matching our UI
+    fg.scene().background = new THREE.Color("#0a0e17");
+
+    // Softer ambient + directional lights
+    const scene = fg.scene();
+    scene.children
+      .filter((c) => c.isLight)
+      .forEach((l) => scene.remove(l));
+    const ambient = new THREE.AmbientLight(0xcccccc, 1.0);
+    const directional = new THREE.DirectionalLight(0xffffff, 0.6);
+    directional.position.set(100, 200, 150);
+    scene.add(ambient);
+    scene.add(directional);
+
+    // Configure d3 forces — link distance based on weight (similarity)
+    fg.d3Force("link")
+      ?.distance((link) => weightToDistance(link.weight))
+      .strength((link) => {
+        const w = Math.max(0.1, Math.min(link.weight || 1, 10));
+        return 0.3 * Math.sqrt(w);
+      });
+
+    fg.d3Force("charge")?.strength(-60);
+    fg.d3Force("center")?.strength(0.05);
+
+    // Initial camera position
+    fg.cameraPosition({ x: 0, y: 0, z: 250 });
+  }, []);
+
+  // ── Node rendering ─────────────────────────────────────────────────────
+
+  const nodeThreeObject = useCallback((node) => {
+    const isPage = node.type === "page";
+    const radius = isPage ? 3.5 : Math.min(2 + node.frequency * 0.4, 6);
+    const color = new THREE.Color(node.color);
+
+    const group = new THREE.Group();
+
+    // Core sphere
+    const geometry = new THREE.SphereGeometry(radius, 20, 20);
+    const material = new THREE.MeshPhongMaterial({
+      color,
+      emissive: color,
+      emissiveIntensity: 0.25,
+      shininess: 60,
+      transparent: true,
+      opacity: 0.92,
+    });
+    const sphere = new THREE.Mesh(geometry, material);
+    group.add(sphere);
+
+    // Outer glow ring for page nodes
+    if (isPage) {
+      const ringGeo = new THREE.RingGeometry(radius + 1, radius + 2, 24);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.2,
+        side: THREE.DoubleSide,
+      });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      group.add(ring);
+    }
+
+    // Text label (always visible as a sprite)
+    const label = node.label.length > 24 ? node.label.slice(0, 24) + "…" : node.label;
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    const fontSize = 28;
+    canvas.width = 256;
+    canvas.height = 48;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.font = `${fontSize}px 'DM Sans', sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#e2e8f0";
+    ctx.fillText(label, canvas.width / 2, fontSize + 4);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    const spriteMat = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false,
+      opacity: 0.85,
+    });
+    const sprite = new THREE.Sprite(spriteMat);
+    sprite.scale.set(24, 4.5, 1);
+    sprite.position.set(0, radius + 4, 0);
+    group.add(sprite);
+
+    return group;
+  }, []);
+
+  // ── Link styling ───────────────────────────────────────────────────────
+
+  const linkWidth = useCallback((link) => {
+    return Math.max(0.3, Math.min((link.weight || 1) * 0.5, 3));
+  }, []);
+
+  const linkColor = useCallback((link) => {
+    const alpha = Math.min(0.15 + (link.weight || 1) * 0.12, 0.7);
+    return `rgba(148, 163, 184, ${alpha})`;
+  }, []);
+
+  // ── Node hover / click ─────────────────────────────────────────────────
+
+  const handleNodeHover = useCallback((node) => {
+    if (containerRef.current) {
+      containerRef.current.style.cursor = node ? "pointer" : "grab";
+    }
+  }, []);
+
+  const handleNodeClick = useCallback(
+    (node) => {
+      // Fly camera to clicked node
+      const fg = fgRef.current;
+      if (!fg || !node) return;
+      const distance = 80;
+      const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z);
+      fg.cameraPosition(
+        { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio },
+        node,
+        1200
+      );
+    },
+    []
+  );
+
+  // ── Empty state ────────────────────────────────────────────────────────
+
+  if (!rawData || !rawData.nodes || rawData.nodes.length === 0) {
+    return (
+      <div className="graph-view" ref={containerRef}>
+        <div className="graph-view__empty">
+          <span className="graph-view__empty-title">Browse pages to build your graph</span>
+          <span className="graph-view__empty-subtitle">
+            Nodes and edges appear as you browse
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="graph-view">
-      <canvas
-        ref={canvasRef}
-        className="graph-view__canvas"
-        onMouseMove={handleMouseMove}
-        onMouseLeave={() => setHoveredNode(null)}
+    <div className="graph-view" ref={containerRef}>
+      <ForceGraph3D
+        ref={fgRef}
+        width={dimensions.width}
+        height={dimensions.height}
+        graphData={graphData}
+        // ── Node config ──
+        nodeThreeObject={nodeThreeObject}
+        nodeThreeObjectExtend={false}
+        // ── Link config ──
+        linkWidth={linkWidth}
+        linkOpacity={1}
+        linkColor={linkColor}
+        linkDirectionalParticles={0}
+        // ── Force engine ──
+        d3AlphaDecay={0.02}
+        d3VelocityDecay={0.3}
+        // ── Interaction ──
+        onNodeHover={handleNodeHover}
+        onNodeClick={handleNodeClick}
+        enableNavigationControls={true}
+        showNavInfo={false}
+        // ── Background ──
+        backgroundColor="#0a0e17"
       />
+      {/* Stats overlay */}
+      <div className="graph-view__stats">
+        {graphData.nodes.length} nodes · {graphData.links.length} edges ·{" "}
+        {rawData.community_count || 0} communities
+      </div>
     </div>
   );
 }
