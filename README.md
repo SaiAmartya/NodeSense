@@ -148,7 +148,7 @@ Environment variables (set in `.env`):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GEMINI_API_KEY` | — | Google Gemini API key |
-| `GEMINI_MODEL` | `gemini-2.0-flash` | Model for extraction/chat |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Model for extraction/chat |
 | `DECAY_RATE` | `0.01` | Edge weight decay rate (per hour) |
 | `LAPLACE_SMOOTHING` | `0.1` | Bayesian prior smoothing |
 | `COMMUNITY_RESOLUTION` | `1.0` | Louvain resolution (>1 = smaller clusters) |
