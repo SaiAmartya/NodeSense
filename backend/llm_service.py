@@ -5,8 +5,10 @@ Two-tier AI strategy:
   - EXTRACTION: Handled by Gemini Nano on-device (in the Chrome extension).
     If Nano is unavailable, the backend uses a fast heuristic fallback
     (title words + content frequency analysis). No Gemini API calls for extraction.
+  - SUMMARIZATION: Heuristic page summarization from title + content snippets.
+    No API calls — purely local string processing.
   - CHAT: Uses Gemini 2.5 Flash via the Gemini API for rich, contextual responses
-    empowered by GraphRAG context injection.
+    empowered by deep GraphRAG context injection.
   - 429 errors on chat: immediate fallback response + 60s cooldown.
 """
 
@@ -114,18 +116,210 @@ def _fallback_extract(title: str, content: str, max_kw: int = 5) -> list[str]:
     return keywords[:max_kw]
 
 
+# ── Page Summarization (Heuristic) ────────────────────────────────────────────
+#
+# Generates concise page summaries from title + content without API calls.
+# These summaries are stored on page nodes to provide semantic depth.
+
+
+def generate_page_summary(title: str, content: str, url: str = "") -> str:
+    """
+    Generate a concise page summary from title and content.
+    Purely heuristic — no API calls. Extracts the most informative
+    opening sentences from the content.
+    """
+    if not content and not title:
+        return ""
+
+    max_len = settings.MAX_PAGE_SUMMARY_LENGTH
+
+    # Clean up the content
+    text = content.strip()
+    if not text:
+        return title[:max_len] if title else ""
+
+    # Split into sentences (handle common abbreviations)
+    sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+
+    if not sentences:
+        # Fall back to first chunk of content
+        return f"{title}: {text[:max_len - len(title) - 2]}" if title else text[:max_len]
+
+    # Build summary from title context + first meaningful sentences
+    summary_parts = []
+    char_count = 0
+
+    for sent in sentences[:3]:
+        if char_count + len(sent) > max_len:
+            # Take as much of this sentence as fits
+            remaining = max_len - char_count
+            if remaining > 30:
+                summary_parts.append(sent[:remaining].rsplit(" ", 1)[0] + "…")
+            break
+        summary_parts.append(sent)
+        char_count += len(sent) + 1
+
+    summary = " ".join(summary_parts)
+
+    # If summary is very short and we have a title, prepend context
+    if len(summary) < 40 and title and title.lower() not in summary.lower():
+        summary = f"{title} — {summary}"
+
+    return summary[:max_len]
+
+
+def extract_keyword_snippets(
+    content: str, keywords: list[str], max_snippet_len: int = 120
+) -> dict[str, str]:
+    """
+    For each keyword, extract the most relevant sentence or phrase
+    from the content where it appears. Returns {keyword: snippet}.
+    """
+    snippets: dict[str, str] = {}
+    if not content:
+        return snippets
+
+    # Split content into sentences
+    sentences = re.split(r'[.!?\n]+', content)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 15]
+
+    for kw in keywords:
+        kw_lower = kw.lower().strip()
+        if not kw_lower:
+            continue
+        # Find the best sentence containing this keyword
+        for sent in sentences:
+            if kw_lower in sent.lower():
+                snippet = sent[:max_snippet_len]
+                if len(sent) > max_snippet_len:
+                    snippet = snippet.rsplit(" ", 1)[0] + "…"
+                snippets[kw_lower] = snippet
+                break
+
+    return snippets
+
+
 # ── Contextual Chat ───────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are NodeSense, a contextually-aware browser assistant.
-You understand the user's current browsing context and help them based on what they're working on.
+# The system prompt template now accepts rich, structured context
+# assembled by the GraphRAG pipeline in langgraph_flow.py
+SYSTEM_PROMPT = """You are NodeSense, a contextually-aware browser AI assistant.
+You have deep insight into the user's current browsing activity through a real-time knowledge graph that tracks their pages, topics, and task clusters.
 
-Current context:
-- Active task: {task_label}
-- Related topics: {keywords}
-- Confidence: {confidence}%
+{context_block}
 
-Recent browsing topics give you insight into what the user is focused on.
-Be helpful, concise, and context-aware. Reference the user's current work naturally."""
+INSTRUCTIONS:
+- Use the above context to understand what the user is currently working on
+- Reference specific pages, topics, and patterns from their browsing naturally
+- When the user asks "what am I working on?", synthesize the trajectory and task clusters into a coherent narrative
+- Be specific — cite page titles and topics rather than being vague
+- If browsing spans multiple tasks, acknowledge the multi-tasking
+- Be concise but context-rich; don't repeat raw data, synthesize it
+- If confidence is low, note that your understanding is still forming"""
+
+
+def build_context_block(context: dict[str, Any]) -> str:
+    """
+    Build the structured context block that gets injected into the system prompt.
+    Transforms the rich context dict from the GraphRAG pipeline into a
+    human-readable, LLM-optimized context section.
+    """
+    sections: list[str] = []
+
+    # ── Active Task ──
+    task_label = context.get("task_label", "Exploring")
+    confidence = context.get("confidence", 0.0)
+    keywords = context.get("keywords", [])
+    sections.append(
+        f"== ACTIVE TASK ==\n"
+        f"Task: {task_label}\n"
+        f"Confidence: {int(confidence * 100)}%\n"
+        f"Core topics: {', '.join(keywords) if keywords else 'none detected yet'}"
+    )
+
+    # ── Browsing Trajectory ──
+    trajectory = context.get("trajectory", [])
+    if trajectory:
+        traj_lines = ["== RECENT BROWSING TRAJECTORY =="]
+        for i, page in enumerate(trajectory, 1):
+            mins = page.get("minutes_ago", 0)
+            if mins < 1:
+                time_str = "just now"
+            elif mins < 60:
+                time_str = f"{int(mins)}m ago"
+            else:
+                time_str = f"{mins / 60:.1f}h ago"
+
+            title = page.get("title", "Untitled")
+            summary = page.get("summary", "")
+            page_kws = page.get("keywords", [])
+
+            line = f"{i}. \"{title}\" ({time_str})"
+            if summary:
+                line += f"\n   Summary: {summary}"
+            if page_kws:
+                line += f"\n   Topics: {', '.join(page_kws)}"
+            traj_lines.append(line)
+        sections.append("\n".join(traj_lines))
+
+    # ── Active Community Deep Context ──
+    community_context = context.get("community_context", {})
+    community_pages = community_context.get("pages", [])
+    kw_relationships = community_context.get("keyword_relationships", [])
+    stats = community_context.get("stats", {})
+
+    if community_pages:
+        comm_lines = [
+            f"== ACTIVE TASK CLUSTER ==\n"
+            f"Cluster size: {stats.get('total_pages', 0)} pages, "
+            f"{stats.get('total_keywords', 0)} keywords, "
+            f"{stats.get('total_edges', 0)} connections"
+        ]
+        comm_lines.append("Key pages in this cluster:")
+        for page in community_pages[:6]:
+            title = page.get("title", "Untitled")
+            summary = page.get("summary", "")
+            visits = page.get("visit_count", 1)
+            entry = f"  - \"{title}\""
+            if visits > 1:
+                entry += f" (visited {visits}x)"
+            if summary:
+                entry += f"\n    {summary}"
+            comm_lines.append(entry)
+        sections.append("\n".join(comm_lines))
+
+    if kw_relationships:
+        rel_lines = ["== TOPIC RELATIONSHIPS =="]
+        for rel in kw_relationships[:8]:
+            rel_lines.append(
+                f"  {rel['from']} ↔ {rel['to']} (strength: {rel['weight']})"
+            )
+        sections.append("\n".join(rel_lines))
+
+    # ── Cross-Community Bridges ──
+    bridges = context.get("bridges", [])
+    if bridges:
+        bridge_lines = ["== CROSS-TOPIC CONNECTIONS =="]
+        for b in bridges[:5]:
+            targets = ", ".join(b.get("bridges_to", []))
+            bridge_lines.append(
+                f"  \"{b['keyword']}\" connects {b.get('from_community', '?')} → {targets}"
+            )
+        sections.append("\n".join(bridge_lines))
+
+    # ── All Task Clusters ──
+    all_tasks = context.get("all_tasks", [])
+    if len(all_tasks) > 1:
+        task_lines = ["== ALL DETECTED TASKS =="]
+        for t in all_tasks:
+            prob = t.get("probability", 0)
+            label = t.get("label", "Unknown")
+            kws = ", ".join(t.get("keywords", [])[:4])
+            task_lines.append(f"  - {label} ({int(prob * 100)}%): {kws}")
+        sections.append("\n".join(task_lines))
+
+    return "\n\n".join(sections)
 
 
 async def generate_contextual_response(
@@ -135,17 +329,21 @@ async def generate_contextual_response(
     """
     Generate a chat response enriched with the user's inferred browsing context.
     This is the ONLY function that calls the Gemini 2.5 Flash API.
+
+    The context dict now contains rich GraphRAG data including:
+      - task_label, keywords, confidence (basic)
+      - trajectory (recent browsing history with summaries)
+      - community_context (pages, keyword relationships in active cluster)
+      - bridges (cross-community connections)
+      - all_tasks (all detected task clusters)
     """
     global _cooldown_until, _total_gemini_calls
     model = _get_model()
     if model is None or _is_rate_limited():
         return _fallback_chat(query, context)
 
-    system = SYSTEM_PROMPT.format(
-        task_label=context.get("task_label", "Exploring"),
-        keywords=", ".join(context.get("keywords", [])),
-        confidence=int(context.get("confidence", 0) * 100),
-    )
+    context_block = build_context_block(context)
+    system = SYSTEM_PROMPT.format(context_block=context_block)
 
     try:
         chat = model.start_chat(history=[])
@@ -166,14 +364,24 @@ def _fallback_chat(query: str, context: dict[str, Any]) -> str:
     """Simple fallback when Gemini is unavailable."""
     task = context.get("task_label", "Exploring")
     kws = ", ".join(context.get("keywords", []))
+
     if task == "Exploring":
         return (
             f"I'm tracking your browsing but haven't identified a clear task yet. "
             f"You asked: \"{query}\". Keep browsing and I'll learn your context!"
         )
+
+    # Build a richer fallback using trajectory if available
+    trajectory = context.get("trajectory", [])
+    traj_info = ""
+    if trajectory:
+        recent = trajectory[:3]
+        pages = [p.get("title", "?") for p in recent]
+        traj_info = f" Recent pages: {', '.join(pages)}."
+
     return (
         f"Based on your browsing, you're working on **{task}** "
-        f"(topics: {kws}). "
+        f"(topics: {kws}).{traj_info} "
         f"You asked: \"{query}\". "
         f"I'd need the Gemini API key configured to give a proper answer. "
         f"Set GEMINI_API_KEY in your .env file."

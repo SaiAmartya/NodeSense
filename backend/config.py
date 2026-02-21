@@ -36,5 +36,11 @@ class Settings:
     MAX_CONTENT_LENGTH: int = int(os.getenv("MAX_CONTENT_LENGTH", "3000"))
     MAX_KEYWORDS_PER_PAGE: int = int(os.getenv("MAX_KEYWORDS_PER_PAGE", "5"))
 
+    # Context enrichment
+    MAX_PAGE_SUMMARY_LENGTH: int = int(os.getenv("MAX_PAGE_SUMMARY_LENGTH", "200"))
+    MAX_CONTEXT_PAGES: int = int(os.getenv("MAX_CONTEXT_PAGES", "8"))
+    MAX_CONTEXT_SNIPPET_LENGTH: int = int(os.getenv("MAX_CONTEXT_SNIPPET_LENGTH", "500"))
+    MAX_TRAJECTORY_PAGES: int = int(os.getenv("MAX_TRAJECTORY_PAGES", "6"))
+
 
 settings = Settings()
