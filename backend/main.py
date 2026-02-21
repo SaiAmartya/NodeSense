@@ -202,6 +202,14 @@ async def get_stats():
     }
 
 
+@app.get("/api/pipeline/events")
+async def get_pipeline_events():
+    """Return recent pipeline execution events for the Visualize tab."""
+    return {
+        "runs": workflows.pipeline_events,
+    }
+
+
 # ── WebSocket (optional real-time channel) ────────────────────────────────────
 
 

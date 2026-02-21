@@ -2,7 +2,7 @@
 
 > Contextually-aware browser agent that builds a knowledge graph of your browsing to provide intelligent, zero-context assistance.
 
-NodeSense passively observes your browsing, extracts topic keywords, builds a **NetworkX knowledge graph**, detects task clusters via **Louvain community detection**, and uses **Bayesian inference** to determine what you're working on — then injects that context into every LLM interaction.
+NodeSense passively observes your browsing, extracts topic keywords, builds a **NetworkX knowledge graph**, detects task clusters via **Louvain community detection**, and uses **Bayesian inference** to determine what you're working on, then injects that context into every LLM interaction.
 
 ## Architecture
 

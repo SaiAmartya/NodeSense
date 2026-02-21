@@ -9,6 +9,7 @@ import React, { useState, useEffect, useCallback } from "react";
 import StatusBar from "./components/StatusBar";
 import ContextView from "./components/ContextView";
 import GraphView from "./components/GraphView";
+import DataFlowView from "./components/DataFlowView";
 import ChatPanel from "./components/ChatPanel";
 import { useBackend } from "./hooks/useBackend";
 
@@ -20,12 +21,13 @@ export default function App() {
     sendChat,
     requestGraph,
     resetGraph,
+    requestPipeline,
     onMessage,
   } = useBackend();
 
   const [messages, setMessages] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState("context"); // "context" | "graph"
+  const [activeTab, setActiveTab] = useState("context"); // "context" | "graph" | "visualize"
 
   // ── Listen for chat responses from the service worker ──────────────────
 
@@ -110,13 +112,21 @@ export default function App() {
         >
           Graph
         </button>
+        <button
+          className={`tab-bar__tab ${activeTab === "visualize" ? "tab-bar__tab--active" : ""}`}
+          onClick={() => setActiveTab("visualize")}
+        >
+          Visualize
+        </button>
       </div>
 
       {/* Tab Content */}
       {activeTab === "context" ? (
         <ContextView context={context} />
-      ) : (
+      ) : activeTab === "graph" ? (
         <GraphView requestGraph={requestGraph} resetGraph={resetGraph} onMessage={onMessage} />
+      ) : (
+        <DataFlowView requestPipeline={requestPipeline} onMessage={onMessage} />
       )}
 
       <ChatPanel
