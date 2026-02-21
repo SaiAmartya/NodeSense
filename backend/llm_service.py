@@ -78,10 +78,11 @@ async def extract_entities(
     return _fallback_extract(title, truncated, max_kw)
 
 
-def _fallback_extract(title: str, content: str, max_kw: int = 5) -> list[str]:
+def _fallback_extract(title: str, content: str, max_kw: int = 12) -> list[str]:
     """
     Smart keyword extraction when LLM is unavailable.
     Combines title words + content frequency analysis.
+    Extracts more keywords to capture specific details.
     """
     stopwords = {
         "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
@@ -97,21 +98,24 @@ def _fallback_extract(title: str, content: str, max_kw: int = 5) -> list[str]:
         "that", "these", "those", "it", "its", "i", "me", "my", "we", "our",
         "you", "your", "he", "him", "his", "she", "her", "they", "them",
         "their", "what", "which", "who", "whom", "how", "when", "where",
-        "why", "|", "-", "–", "—",
+        "why", "|", "-", "–", "—", "also", "like", "get", "got", "new",
+        "one", "two", "see", "way", "make", "first", "back", "much",
+        "well", "even", "come", "take", "many", "good", "know", "help",
+        "going", "still", "here", "right", "think", "look", "want",
+        "give", "use", "find", "tell", "ask", "work", "seem", "feel",
+        "try", "leave", "call",
     }
     words = re.findall(r"[a-zA-Z]{3,}", title)
     keywords = [w.lower() for w in words if w.lower() not in stopwords]
 
-    # If title gives too few, pull from content
-    if len(keywords) < 3:
-        content_words = re.findall(r"[a-zA-Z]{4,}", content[:500])
-        content_kws = [w.lower() for w in content_words if w.lower() not in stopwords]
-        # Frequency-based selection
-        freq: dict[str, int] = {}
-        for w in content_kws:
-            freq[w] = freq.get(w, 0) + 1
-        top = sorted(freq.items(), key=lambda x: x[1], reverse=True)
-        keywords.extend([w for w, _ in top[:5] if w not in keywords])
+    # Pull keywords from content using frequency analysis
+    content_words = re.findall(r"[a-zA-Z]{4,}", content[:3000])
+    content_kws = [w.lower() for w in content_words if w.lower() not in stopwords]
+    freq: dict[str, int] = {}
+    for w in content_kws:
+        freq[w] = freq.get(w, 0) + 1
+    top = sorted(freq.items(), key=lambda x: x[1], reverse=True)
+    keywords.extend([w for w, _ in top[:max_kw] if w not in keywords])
 
     return keywords[:max_kw]
 
@@ -124,9 +128,10 @@ def _fallback_extract(title: str, content: str, max_kw: int = 5) -> list[str]:
 
 def generate_page_summary(title: str, content: str, url: str = "") -> str:
     """
-    Generate a concise page summary from title and content.
-    Purely heuristic — no API calls. Extracts the most informative
-    opening sentences from the content.
+    Generate a comprehensive page summary from title and content.
+    Purely heuristic — no API calls. Extracts multiple informative
+    paragraphs and key details from the content to preserve as much
+    specific information as possible (dates, names, events, facts).
     """
     if not content and not title:
         return ""
@@ -140,32 +145,34 @@ def generate_page_summary(title: str, content: str, url: str = "") -> str:
 
     # Split into sentences (handle common abbreviations)
     sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 15]
 
     if not sentences:
         # Fall back to first chunk of content
-        return f"{title}: {text[:max_len - len(title) - 2]}" if title else text[:max_len]
+        result = f"{title}: {text}" if title else text
+        return result[:max_len]
 
-    # Build summary from title context + first meaningful sentences
+    # Build summary: pack as many meaningful sentences as possible
     summary_parts = []
     char_count = 0
 
-    for sent in sentences[:3]:
+    # Prepend title context if it's informative
+    if title and title.lower() not in text[:200].lower():
+        prefix = f"Page: {title}."
+        summary_parts.append(prefix)
+        char_count += len(prefix) + 1
+
+    for sent in sentences:
         if char_count + len(sent) > max_len:
             # Take as much of this sentence as fits
             remaining = max_len - char_count
-            if remaining > 30:
+            if remaining > 40:
                 summary_parts.append(sent[:remaining].rsplit(" ", 1)[0] + "…")
             break
         summary_parts.append(sent)
         char_count += len(sent) + 1
 
     summary = " ".join(summary_parts)
-
-    # If summary is very short and we have a title, prepend context
-    if len(summary) < 40 and title and title.lower() not in summary.lower():
-        summary = f"{title} — {summary}"
-
     return summary[:max_len]
 
 
@@ -212,10 +219,12 @@ You have deep insight into the user's current browsing activity through a real-t
 INSTRUCTIONS:
 - Use the above context to understand what the user is currently working on
 - Reference specific pages, topics, and patterns from their browsing naturally
+- You have access to actual page content under "--- Page Content ---" sections — USE this content to answer specific factual questions about what the user has read (dates, names, events, details, facts)
 - When the user asks "what am I working on?", synthesize the trajectory and task clusters into a coherent narrative
-- Be specific — cite page titles and topics rather than being vague
+- Be specific — cite page titles, specific facts, dates, and details rather than being vague
 - If browsing spans multiple tasks, acknowledge the multi-tasking
 - Be concise but context-rich; don't repeat raw data, synthesize it
+- If you can find the answer in the page content provided, give a direct factual answer
 - If confidence is low, note that your understanding is still forming"""
 
 
@@ -224,6 +233,9 @@ def build_context_block(context: dict[str, Any]) -> str:
     Build the structured context block that gets injected into the system prompt.
     Transforms the rich context dict from the GraphRAG pipeline into a
     human-readable, LLM-optimized context section.
+
+    Now includes comprehensive page content for the most relevant pages,
+    enabling the LLM to answer specific detail questions about page content.
     """
     sections: list[str] = []
 
@@ -238,10 +250,13 @@ def build_context_block(context: dict[str, Any]) -> str:
         f"Core topics: {', '.join(keywords) if keywords else 'none detected yet'}"
     )
 
-    # ── Browsing Trajectory ──
+    # ── Browsing Trajectory (with deep content for recent pages) ──
     trajectory = context.get("trajectory", [])
     if trajectory:
         traj_lines = ["== RECENT BROWSING TRAJECTORY =="]
+        deep_content_budget = settings.MAX_DEEP_CONTENT_PAGES
+        deep_content_max_len = settings.MAX_DEEP_CONTENT_LENGTH
+
         for i, page in enumerate(trajectory, 1):
             mins = page.get("minutes_ago", 0)
             if mins < 1:
@@ -253,6 +268,7 @@ def build_context_block(context: dict[str, Any]) -> str:
 
             title = page.get("title", "Untitled")
             summary = page.get("summary", "")
+            content_snippet = page.get("content_snippet", "")
             page_kws = page.get("keywords", [])
 
             line = f"{i}. \"{title}\" ({time_str})"
@@ -260,6 +276,13 @@ def build_context_block(context: dict[str, Any]) -> str:
                 line += f"\n   Summary: {summary}"
             if page_kws:
                 line += f"\n   Topics: {', '.join(page_kws)}"
+
+            # Include full page content for the most recent/relevant pages
+            if content_snippet and deep_content_budget > 0:
+                clipped = content_snippet[:deep_content_max_len]
+                line += f"\n   --- Page Content ---\n   {clipped}"
+                deep_content_budget -= 1
+
             traj_lines.append(line)
         sections.append("\n".join(traj_lines))
 
@@ -277,21 +300,33 @@ def build_context_block(context: dict[str, Any]) -> str:
             f"{stats.get('total_edges', 0)} connections"
         ]
         comm_lines.append("Key pages in this cluster:")
-        for page in community_pages[:6]:
+        deep_cluster_budget = settings.MAX_DEEP_CONTENT_PAGES
+        deep_cluster_max_len = settings.MAX_DEEP_CONTENT_LENGTH
+
+        for page in community_pages[:8]:
             title = page.get("title", "Untitled")
             summary = page.get("summary", "")
+            content_snippet = page.get("content_snippet", "")
             visits = page.get("visit_count", 1)
+
             entry = f"  - \"{title}\""
             if visits > 1:
                 entry += f" (visited {visits}x)"
             if summary:
-                entry += f"\n    {summary}"
+                entry += f"\n    Summary: {summary}"
+
+            # Include page content for the most relevant cluster pages
+            if content_snippet and deep_cluster_budget > 0:
+                clipped = content_snippet[:deep_cluster_max_len]
+                entry += f"\n    --- Page Content ---\n    {clipped}"
+                deep_cluster_budget -= 1
+
             comm_lines.append(entry)
         sections.append("\n".join(comm_lines))
 
     if kw_relationships:
         rel_lines = ["== TOPIC RELATIONSHIPS =="]
-        for rel in kw_relationships[:8]:
+        for rel in kw_relationships[:10]:
             rel_lines.append(
                 f"  {rel['from']} ↔ {rel['to']} (strength: {rel['weight']})"
             )
@@ -315,7 +350,7 @@ def build_context_block(context: dict[str, Any]) -> str:
         for t in all_tasks:
             prob = t.get("probability", 0)
             label = t.get("label", "Unknown")
-            kws = ", ".join(t.get("keywords", [])[:4])
+            kws = ", ".join(t.get("keywords", [])[:6])
             task_lines.append(f"  - {label} ({int(prob * 100)}%): {kws}")
         sections.append("\n".join(task_lines))
 

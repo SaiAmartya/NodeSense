@@ -141,6 +141,7 @@ class BayesianTaskInferrer:
             if idx < len(community_labels):
                 all_tasks.append(
                     {
+                        "community_idx": idx,
                         "label": community_labels[idx].get("label", f"Task {idx}"),
                         "keywords": community_labels[idx].get("keywords", []),
                         "size": community_labels[idx].get("size", 0),

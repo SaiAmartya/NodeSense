@@ -58,7 +58,8 @@ async function initNano() {
           role: "system",
           content:
             "You are a keyword extraction engine for a browsing knowledge graph. " +
-            "Given web page content, extract 3-5 concise, lowercase topic keywords or short phrases. " +
+            "Given web page content, extract 8-12 concise, lowercase topic keywords or short phrases. " +
+            "Include specific names, dates, events, locations, organizations, and important details. " +
             "Always respond with ONLY a JSON array of strings, no explanation.",
         },
       ],
@@ -88,9 +89,10 @@ async function initNano() {
 async function extractKeywordsWithNano(title, content) {
   if (!nanoSession) return null;
 
-  const truncated = content.slice(0, 1500); // Nano has a smaller context window
+  const truncated = content.slice(0, 2000); // Nano has a smaller context window
   const prompt =
-    `Extract 3-5 key topic keywords from this web page.\n` +
+    `Extract 8-12 key topic keywords and key phrases from this web page.\n` +
+    `Include specific names, dates, events, organizations, and important details.\n` +
     `Return ONLY a JSON array of lowercase strings.\n\n` +
     `Title: ${title}\n` +
     `Content:\n${truncated}`;
@@ -114,7 +116,7 @@ async function extractKeywordsWithNano(title, content) {
       return keywords
         .map((k) => String(k).toLowerCase().trim())
         .filter(Boolean)
-        .slice(0, 5);
+        .slice(0, 12);
     }
   } catch (err) {
     console.warn("[NodeSense] Nano extraction failed:", err.message);
@@ -243,8 +245,8 @@ async function processPageVisit(pageData) {
     );
     if (keywords) {
       payload.keywords = keywords;
-      // Send truncated content for summary generation (not full content)
-      payload.content = (pageData.content || "").slice(0, 500);
+      // Send full content so the backend can generate rich summaries and content snippets
+      payload.content = pageData.content || "";
       console.log("[NodeSense] Nano extracted:", keywords.join(", "));
     } else {
       // Nano failed for this page — fall back to backend extraction

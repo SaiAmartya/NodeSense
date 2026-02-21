@@ -64,7 +64,7 @@ The content script:
 1. Clones the page's `<body>` element
 2. Strips noisy elements (scripts, styles, nav, footer, ads, sidebars)
 3. Extracts text content, collapses whitespace
-4. Truncates to 3000 characters
+4. Truncates to 8000 characters
 5. Sends `PAGE_CONTENT` message to the service worker
 
 ### Step 1.2: Keyword Extraction
@@ -73,12 +73,12 @@ The content script:
 
 If Gemini Nano is available:
 - Clone the base Nano session (stateless)
-- Prompt with title + truncated content (1500 chars)
-- Parse structured JSON response → `string[]` of keywords
+- Prompt with title + truncated content (2000 chars)
+- Parse structured JSON response → `string[]` of 8-12 keywords (including specific names, dates, events)
 - Destroy the clone
 
 If Nano is unavailable:
-- Raw content is sent to the backend for heuristic extraction
+- Raw content is sent to the backend for heuristic extraction (up to 12 keywords)
 
 ### Step 1.3: Backend Submission
 **Component:** `service-worker.js`  
@@ -90,13 +90,13 @@ The payload sent to the backend:
 {
   "url": "https://react.dev/learn/hooks",
   "title": "React Docs - Hooks Guide",
-  "content": "First 500 chars of page content...",
-  "keywords": ["react", "hooks", "useState", "useEffect"],
+  "content": "Full page content up to 8000 chars...",
+  "keywords": ["react", "hooks", "useState", "useEffect", "component lifecycle", "state management", "custom hooks", "cleanup"],
   "timestamp": 1740100000.0
 }
 ```
 
-**Key change:** Content is now always sent (even with Nano keywords), truncated to 500 chars. This enables backend summary generation.
+**Key design:** Content is always sent in full (even with Nano keywords), up to 8000 chars. This enables comprehensive backend summary generation and deep content storage on graph nodes.
 
 ## Phase 2: Page Analysis Pipeline (Backend)
 
@@ -111,15 +111,16 @@ The payload sent to the backend:
 
 - If a `summary` field was provided: use directly
 - If not: generate heuristically from title + content
-  - Extract first 1-2 coherent sentences from the content
-  - Produce a concise description (max 200 chars)
-- Also prepare a `content_snippet` (first 500 chars) for storage
+  - Pack as many meaningful sentences as possible from the content
+  - Preserve specific details: dates, names, events, facts
+  - Produce a comprehensive summary (up to 1500 chars)
+- Also prepare a `content_snippet` (first 3000 chars) for deep context storage
 
 ### Step 2.3: Graph Update
 **LangGraph node:** `update_graph`
 
 Updates the NetworkX knowledge graph:
-1. **Upsert page node** with title, summary, content_snippet, visit count, timestamps
+1. **Upsert page node** with title, summary (up to 1500 chars), content_snippet (up to 3000 chars), visit count, timestamps
 2. **Upsert keyword nodes** with frequency, page references
 3. **Create/strengthen page↔keyword edges** (association)
 4. **Create/strengthen keyword↔keyword edges** (co-occurrence)
@@ -146,8 +147,8 @@ Runs Louvain community detection on the graph:
 
 **Context Enrichment:**
 After inference, `_enrich_context()` assembles deep context:
-1. **Browsing trajectory** — Recent pages with summaries, keywords, temporal distance
-2. **Community context** — Pages and keyword relationships in the active cluster
+1. **Browsing trajectory** — Recent pages with summaries, content snippets, keywords, temporal distance
+2. **Community context** — Pages (with summaries + content) and keyword relationships in the active cluster
 3. **Cross-community bridges** — Keywords connecting different task areas
 
 ### Step 2.6: Response
@@ -176,13 +177,13 @@ Re-enriches the cached context with fresh graph data:
 
 Transforms the enriched context dict into structured prompt sections:
 - `== ACTIVE TASK ==`
-- `== RECENT BROWSING TRAJECTORY ==`
-- `== ACTIVE TASK CLUSTER ==`
+- `== RECENT BROWSING TRAJECTORY ==` (with `--- Page Content ---` for top pages)
+- `== ACTIVE TASK CLUSTER ==` (with `--- Page Content ---` for top cluster pages)
 - `== TOPIC RELATIONSHIPS ==`
 - `== CROSS-TOPIC CONNECTIONS ==`
 - `== ALL DETECTED TASKS ==`
 
-Empty sections are omitted.
+Empty sections are omitted. Page content is included for the top N most relevant pages (controlled by `MAX_DEEP_CONTENT_PAGES`, default 4) in both the trajectory and cluster sections, enabling the AI to answer specific factual questions.
 
 ### Step 3.4: Response Generation
 **LangGraph node:** `generate_response`

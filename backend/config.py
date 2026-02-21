@@ -33,14 +33,18 @@ class Settings:
     COMMUNITY_SEED: int = int(os.getenv("COMMUNITY_SEED", "42"))
 
     # Content processing
-    MAX_CONTENT_LENGTH: int = int(os.getenv("MAX_CONTENT_LENGTH", "3000"))
-    MAX_KEYWORDS_PER_PAGE: int = int(os.getenv("MAX_KEYWORDS_PER_PAGE", "5"))
+    MAX_CONTENT_LENGTH: int = int(os.getenv("MAX_CONTENT_LENGTH", "8000"))
+    MAX_KEYWORDS_PER_PAGE: int = int(os.getenv("MAX_KEYWORDS_PER_PAGE", "12"))
 
     # Context enrichment
-    MAX_PAGE_SUMMARY_LENGTH: int = int(os.getenv("MAX_PAGE_SUMMARY_LENGTH", "200"))
-    MAX_CONTEXT_PAGES: int = int(os.getenv("MAX_CONTEXT_PAGES", "8"))
-    MAX_CONTEXT_SNIPPET_LENGTH: int = int(os.getenv("MAX_CONTEXT_SNIPPET_LENGTH", "500"))
-    MAX_TRAJECTORY_PAGES: int = int(os.getenv("MAX_TRAJECTORY_PAGES", "6"))
+    MAX_PAGE_SUMMARY_LENGTH: int = int(os.getenv("MAX_PAGE_SUMMARY_LENGTH", "1500"))
+    MAX_CONTEXT_PAGES: int = int(os.getenv("MAX_CONTEXT_PAGES", "10"))
+    MAX_CONTEXT_SNIPPET_LENGTH: int = int(os.getenv("MAX_CONTEXT_SNIPPET_LENGTH", "3000"))
+    MAX_TRAJECTORY_PAGES: int = int(os.getenv("MAX_TRAJECTORY_PAGES", "8"))
+
+    # Deep context — controls how much raw content goes to the LLM
+    MAX_DEEP_CONTENT_PAGES: int = int(os.getenv("MAX_DEEP_CONTENT_PAGES", "4"))
+    MAX_DEEP_CONTENT_LENGTH: int = int(os.getenv("MAX_DEEP_CONTENT_LENGTH", "2000"))
 
 
 settings = Settings()

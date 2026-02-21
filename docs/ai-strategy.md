@@ -18,7 +18,7 @@ This separation is deliberate: extraction runs on *every page visit* (high frequ
 ## Tier 1: Gemini Nano (On-Device Extraction)
 
 ### What It Does
-When the user visits a page, Gemini Nano extracts 3-5 concise topic keywords from the page title and content. These keywords flow into the knowledge graph as nodes.
+When the user visits a page, Gemini Nano extracts 8-12 concise topic keywords and key phrases from the page title and content. These keywords flow into the knowledge graph as nodes. The extraction prompt specifically asks for names, dates, events, organizations, and important details to maximize factual coverage.
 
 ### How It Works
 1. The service worker creates a **base session** on startup with a system prompt tuned for keyword extraction
@@ -52,20 +52,27 @@ Confidence: 87%
 == ACTIVE TASK ==
 Task: React Development
 Confidence: 87%
-Core topics: react, hooks, state, useEffect, components
+Core topics: react, hooks, state, useEffect, components, lifecycle, cleanup, custom hooks
 
 == RECENT BROWSING TRAJECTORY ==
 1. "React Docs - useEffect" (3m ago)
-   Summary: Documentation about the useEffect hook lifecycle...
-   Topics: react, useEffect, lifecycle
+   Summary: Documentation about the useEffect hook lifecycle, covering dependencies,
+   cleanup functions, and synchronization with external systems...
+   Topics: react, useEffect, lifecycle, cleanup, dependencies
+   --- Page Content ---
+   React’s useEffect hook lets you synchronize a component with an external
+   system. The cleanup function runs before the component unmounts...
 2. "SO: useEffect cleanup" (12m ago)
-   Summary: Discussion about preventing memory leaks...
+   Summary: Discussion about preventing memory leaks in cleanup functions...
+   Topics: useEffect, memory, cleanup, subscriptions
 
 == ACTIVE TASK CLUSTER ==
 Cluster size: 12 pages, 18 keywords, 45 connections
 Key pages:
   - "React Hooks API Reference" (visited 3x)
-    Reference documentation for all built-in React hooks
+    Summary: Reference documentation for all built-in React hooks...
+    --- Page Content ---
+    useState returns a stateful value and a function to update it...
 
 == TOPIC RELATIONSHIPS ==
   react ↔ hooks (strength: 5.2)
@@ -77,6 +84,7 @@ Key pages:
 
 The difference is profound. The enhanced context enables the AI to:
 - Reference specific pages the user has been reading
+- **Answer specific factual questions** using raw page content (dates, names, events, details)
 - Understand the temporal sequence of their browsing
 - Identify relationships between concepts
 - Recognize when the user is multi-tasking across topics
@@ -86,15 +94,18 @@ The difference is profound. The enhanced context enables the AI to:
 - **Retry logic** with exponential backoff (up to 2 retries)
 - **Fallback responses** when the API is unavailable, still incorporating context
 
-## Summarization: The Third Function
+## Summarization + Content Storage: The Third Function
 
-Page summarization is a critical middle ground — it happens for every page visit but uses **no API calls**:
+Page summarization and content storage form a critical middle ground — they happen for every page visit but use **no API calls**:
 
-1. The heuristic summarizer takes the page title + first ~300 chars of content
-2. It extracts the first 1-2 coherent sentences
-3. The result is stored on the page node in the knowledge graph
+1. The heuristic summarizer takes the page title + content
+2. It packs as many meaningful sentences as possible (up to 1500 chars), preserving factual details
+3. A raw content snippet (up to 3000 chars) is stored alongside the summary
+4. Both are stored on the page node in the knowledge graph
 
-This is purely local string processing. The summaries are concise but informative enough to give the chat AI meaningful page-level context.
+During chat context assembly, the top pages (controlled by `MAX_DEEP_CONTENT_PAGES`, default 4) have their raw content injected into the LLM context under `--- Page Content ---` sections. This two-layer approach means:
+- **Summaries** give the AI an overview of all recent pages
+- **Raw content** gives the AI factual precision for the most relevant pages
 
 ## Why Not Use Flash for Everything?
 
@@ -116,18 +127,20 @@ Nano handles the high-frequency, low-complexity work (keyword extraction) for fr
 ```
 Page Visit
     │
-    ├─ Nano available ───→ Keywords (Nano) + Content snippet (500 chars) → Backend
-    │                        Backend generates summary from snippet
+    ├─ Nano available ───→ Keywords (8-12, Nano) + Full content (up to 8000 chars) → Backend
+    │                        Backend generates summary (up to 1500 chars)
+    │                        Backend stores content_snippet (up to 3000 chars)
     │
-    └─ Nano unavailable ─→ Full content (3000 chars) → Backend
-                             Backend extracts keywords (heuristic)
-                             Backend generates summary from content
+    └─ Nano unavailable ─→ Full content (8000 chars) → Backend
+                             Backend extracts keywords (up to 12, heuristic)
+                             Backend generates summary + stores content_snippet
 
 Chat Query
     │
     └─ Always ──→ Cached enriched context → Build context block → Flash API
-                   (trajectory, summaries,    (structured prompt     (contextual
-                    relationships, bridges)    sections)              response)
+                   (trajectory + content,     (structured prompt     (contextual
+                    summaries, relationships,  with page content      response)
+                    bridges)                   for top pages)
 ```
 
 ## System Prompt Philosophy

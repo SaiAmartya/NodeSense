@@ -23,6 +23,7 @@ from langgraph.graph import StateGraph, START, END
 
 from graph_service import GraphService
 from bayesian import BayesianTaskInferrer
+from config import settings
 import llm_service
 
 
@@ -137,21 +138,23 @@ class NodeSenseWorkflows:
 
         If a summary was pre-provided (e.g., from Nano), use it.
         Otherwise, generate one heuristically from the content.
-        Also prepares a content snippet for storage.
+        Also prepares a content snippet for storage — uses the full
+        configured MAX_CONTEXT_SNIPPET_LENGTH for comprehensive storage.
         """
         existing_summary = state.get("summary", "")
-        if existing_summary:
-            return {
-                "summary": existing_summary,
-                "content_snippet": state.get("content", "")[:500],
-            }
-
         content = state.get("content", "")
         title = state.get("title", "")
         url = state.get("url", "")
+        snippet_len = settings.MAX_CONTEXT_SNIPPET_LENGTH
+
+        if existing_summary:
+            return {
+                "summary": existing_summary,
+                "content_snippet": content[:snippet_len] if content else "",
+            }
 
         summary = llm_service.generate_page_summary(title, content, url)
-        content_snippet = content[:500] if content else ""
+        content_snippet = content[:snippet_len] if content else ""
 
         return {"summary": summary, "content_snippet": content_snippet}
 
@@ -242,8 +245,9 @@ class NodeSenseWorkflows:
         if context.get("confidence", 0) > 0:
             # Re-enrich with latest graph data
             posteriors = {}
-            for i, task in enumerate(context.get("all_tasks", [])):
-                posteriors[i] = task.get("probability", 0)
+            for task in context.get("all_tasks", []):
+                idx = task.get("community_idx", 0)
+                posteriors[idx] = task.get("probability", 0)
             context = self._enrich_context(context, posteriors)
 
         return {"active_context": context}
