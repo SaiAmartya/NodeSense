@@ -313,6 +313,7 @@ class GraphService:
                 "url": data.get("url", node_id.replace("page:", "")),
                 "title": data.get("title", ""),
                 "summary": data.get("summary", ""),
+                "content_snippet": data.get("content_snippet", ""),
                 "visit_count": data.get("visit_count", 1),
                 "last_visited": data.get("last_visited", 0),
             })
@@ -384,7 +385,8 @@ class GraphService:
                 "url": data.get("url", node_id.replace("page:", "")),
                 "title": data.get("title", ""),
                 "summary": data.get("summary", ""),
-                "keywords": connected_kws[:5],
+                "content_snippet": data.get("content_snippet", ""),
+                "keywords": connected_kws[:8],
                 "minutes_ago": round(minutes_ago, 1),
                 "visit_count": data.get("visit_count", 1),
             })

@@ -90,6 +90,7 @@ export default function GraphView({ requestGraph, resetGraph, onMessage }) {
   const [tooltip, setTooltip] = useState(null); // { x, y, node?, link? }
   const [hoveredNode, setHoveredNode] = useState(null);
   const [resetting, setResetting] = useState(false);
+  const [selectedNode, setSelectedNode] = useState(null); // detail panel
 
   // ── Data fetching ──────────────────────────────────────────────────────
 
@@ -136,6 +137,12 @@ export default function GraphView({ requestGraph, resetGraph, onMessage }) {
       frequency: n.frequency || 1,
       visitCount: n.visit_count || 0,
       color: getCommunityColor(n.community ?? -1),
+      // Rich data for detail panel
+      summary: n.summary || "",
+      contentSnippet: n.content_snippet || "",
+      url: n.url || "",
+      title: n.title || "",
+      pageRefs: n.page_refs || [],
     }));
 
     const nodeIds = new Set(nodes.map((n) => n.id));
@@ -518,13 +525,23 @@ export default function GraphView({ requestGraph, resetGraph, onMessage }) {
   const handleNodeClick = useCallback((node) => {
     const fg = fgRef.current;
     if (!fg || !node) return;
+
+    // Fly-to animation
     const distance = 60;
     const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z || 1);
     fg.cameraPosition(
       { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio },
       node,
-      1500 // longer transition for smoother fly-to
+      1500
     );
+
+    // Show detail panel if this node has rich data
+    const hasContent = node.summary || node.contentSnippet || node.url || (node.pageRefs && node.pageRefs.length > 0);
+    if (hasContent) {
+      setSelectedNode(node);
+    } else {
+      setSelectedNode(null);
+    }
   }, []);
 
   // ── Empty state ────────────────────────────────────────────────────────
@@ -688,6 +705,81 @@ export default function GraphView({ requestGraph, resetGraph, onMessage }) {
       >
         {resetting ? "Clearing…" : "Reset Graph"}
       </button>
+
+      {/* ── Node Detail Panel ── */}
+      {selectedNode && (
+        <div className="graph-detail">
+          <div className="graph-detail__header">
+            <div className="graph-detail__type-badge" style={{ background: selectedNode.color }}>
+              {selectedNode.type === "page" ? "PAGE" : "KW"}
+            </div>
+            <div className="graph-detail__title">
+              {selectedNode.title || selectedNode.label}
+            </div>
+            <button
+              className="graph-detail__close"
+              onClick={() => setSelectedNode(null)}
+              title="Close"
+            >
+              ✕
+            </button>
+          </div>
+
+          {selectedNode.url && (
+            <div className="graph-detail__url">{selectedNode.url}</div>
+          )}
+
+          {selectedNode.type === "page" && selectedNode.visitCount > 0 && (
+            <div className="graph-detail__meta">
+              <span>Visits: {selectedNode.visitCount}</span>
+              <span>Community: {selectedNode.community >= 0 ? selectedNode.community : "—"}</span>
+            </div>
+          )}
+
+          {selectedNode.type === "keyword" && (
+            <div className="graph-detail__meta">
+              <span>Frequency: {selectedNode.frequency}</span>
+              <span>Community: {selectedNode.community >= 0 ? selectedNode.community : "—"}</span>
+              {selectedNode.pageRefs.length > 0 && (
+                <span>Pages: {selectedNode.pageRefs.length}</span>
+              )}
+            </div>
+          )}
+
+          {selectedNode.summary && (
+            <div className="graph-detail__section">
+              <div className="graph-detail__section-label">Summary</div>
+              <div className="graph-detail__section-body">
+                {selectedNode.summary}
+              </div>
+            </div>
+          )}
+
+          {selectedNode.contentSnippet && (
+            <div className="graph-detail__section">
+              <div className="graph-detail__section-label">Page Content</div>
+              <div className="graph-detail__section-body graph-detail__section-body--content">
+                {selectedNode.contentSnippet}
+              </div>
+            </div>
+          )}
+
+          {selectedNode.pageRefs && selectedNode.pageRefs.length > 0 && (
+            <div className="graph-detail__section">
+              <div className="graph-detail__section-label">
+                Appears on {selectedNode.pageRefs.length} page{selectedNode.pageRefs.length !== 1 ? "s" : ""}
+              </div>
+              <div className="graph-detail__page-refs">
+                {selectedNode.pageRefs.map((ref, i) => (
+                  <div key={i} className="graph-detail__page-ref">
+                    {ref}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

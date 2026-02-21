@@ -20,4 +20,4 @@ NodeSense is a **contextually-aware browser AI** that works by:
 3. **Understanding** — Louvain community detection + Bayesian inference identify what task you're working on
 4. **Assisting** — Deep GraphRAG context injection gives the LLM genuine understanding of your activity
 
-The key insight: **retrieval determines what nodes are relevant; enrichment determines how useful those nodes are.** NodeSense balances both — using probabilistic retrieval (community detection + Bayesian inference) to find the right context, and semantic enrichment (page summaries, browsing trajectories, keyword relationships) to make that context deeply informative.
+The key insight: **retrieval determines what nodes are relevant; enrichment determines how useful those nodes are.** NodeSense balances both — using probabilistic retrieval (community detection + Bayesian inference) to find the right context, and deep content enrichment (comprehensive page summaries, raw content snippets, browsing trajectories, keyword relationships) to make that context actionable for factual question-answering.

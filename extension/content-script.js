@@ -11,7 +11,7 @@
 (() => {
   "use strict";
 
-  const MAX_CONTENT_LENGTH = 3000;
+  const MAX_CONTENT_LENGTH = 8000;
 
   /**
    * Extract meaningful text from the page body.

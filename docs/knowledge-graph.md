@@ -22,13 +22,13 @@ Represent individual web pages the user has visited.
 |-----------|---------|
 | `title` | Human-readable page title |
 | `url` | Full URL for reference |
-| `summary` | Concise description of the page content (heuristically generated) |
-| `content_snippet` | First ~500 chars of page body text for reference |
+| `summary` | Comprehensive description of the page content — up to ~1500 chars, heuristically generated from multiple sentences |
+| `content_snippet` | First ~3000 chars of page body text, stored for deep context injection during chat |
 | `visit_count` | Number of times the user has visited this page |
 | `first_visited` | Unix timestamp of the first visit |
 | `last_visited` | Unix timestamp of the most recent visit |
 
-**Page summaries** are generated heuristically from the page title and content — no API calls needed. They capture the *essence* of what each page is about, enabling the AI to reason about specific pages rather than just abstract keywords.
+**Page summaries** are generated heuristically from the page title and content — no API calls needed. They capture multiple paragraphs of informative content (up to 1500 chars), preserving specific details like dates, names, events, and facts. Combined with the raw `content_snippet` (up to 3000 chars), each page node carries enough context for the AI to answer specific factual questions about the page.
 
 ### Keyword Nodes (`kw:<term>`)
 
@@ -98,18 +98,19 @@ Given a set of keywords, retrieve the n-hop neighborhood — all nodes within `n
 
 ### Rich Community Context
 For a given community, assemble:
-- **Page summaries** — Recent pages in the cluster with their summaries, sorted by recency
+- **Page summaries + content** — Recent pages in the cluster with their summaries and raw content snippets, sorted by recency
 - **Keyword relationships** — The strongest keyword↔keyword edges within the community, revealing which concepts are most tightly coupled
 - **Statistics** — Total pages, keywords, and connections in the cluster
 
 ### Browsing Trajectory
-The most recently visited pages across the entire graph, each with:
+The most recently visited pages across the entire graph (up to 8), each with:
 - Title and URL
-- Page summary
-- Connected keywords
+- Page summary (up to 1500 chars)
+- Raw content snippet (up to 3000 chars)
+- Connected keywords (up to 8 per page)
 - Time since last visit
 
-This temporal ordering gives the AI a sense of the user's browsing *sequence*, not just a bag of topics.
+This temporal ordering gives the AI a sense of the user's browsing *sequence*, not just a bag of topics. The raw content snippets enable the AI to answer specific factual questions about recently visited pages.
 
 ### Cross-Community Bridges
 Keywords that have edges bridging into multiple communities. These represent **conceptual connections** between different task areas — for example, "typescript" might bridge a "React Development" cluster and a "Backend API" cluster.
@@ -137,5 +138,5 @@ NodeSense's graph is per-user and remains small enough to fit in memory (max 500
 **Why heterogeneous nodes (page + keyword)?**  
 Separating pages from keywords enables two distinct retrieval strategies: keyword-based (conceptual) and page-based (source-specific). The bipartite structure also means community detection groups related pages *and* related concepts together.
 
-**Why store summaries on nodes?**  
-Raw keyword lists are insufficient for the AI to understand context deeply. Page summaries bridge the gap between "the user visited pages about React hooks" and "the user was reading documentation about useEffect cleanup patterns and how to avoid memory leaks." This semantic depth is what enables genuinely helpful AI responses.
+**Why store summaries AND content snippets on nodes?**  
+Raw keyword lists are insufficient for the AI to understand context deeply. Page summaries bridge the gap between "the user visited pages about React hooks" and "the user was reading documentation about useEffect cleanup patterns and how to avoid memory leaks." Content snippets go further — they preserve the actual page text (up to 3000 chars), enabling the AI to answer factual questions like "when is the human trafficking awareness day?" that require specific details only present in the original page content. This two-layer approach (summary for overview, content for detail) balances context density with factual precision.
