@@ -139,10 +139,16 @@ body {
   border: 1px solid var(--accent-glow);
 }
 
-.badge--api {
+.badge--flash {
   background: var(--accent-warm-dim);
   color: var(--accent-warm);
   border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.badge--fallback {
+  background: rgba(100, 116, 139, 0.15);
+  color: rgba(148, 163, 184, 0.8);
+  border: 1px solid rgba(100, 116, 139, 0.3);
 }
 
 @keyframes pulse {

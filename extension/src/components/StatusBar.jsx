@@ -1,7 +1,11 @@
 /**
  * NodeSense — StatusBar Component
  *
- * Displays: logo, backend connection dot, Nano AI badge, active task preview.
+ * Displays: logo, backend connection dot, AI tier badges, active task preview.
+ *
+ * Badge meaning:
+ *   NANO  — Gemini Nano is active for on-device keyword extraction
+ *   FLASH — Gemini 2.5 Flash is the chat/reasoning backend
  */
 
 import React from "react";
@@ -19,13 +23,17 @@ export default function StatusBar({ connected, nanoAvailable, activeTask }) {
         />
       </div>
       <div className="status-bar__badges">
-        {nanoAvailable && (
-          <span className="badge badge--nano" title="Chrome Built-in AI active">
+        {nanoAvailable ? (
+          <span className="badge badge--nano" title="Gemini Nano — on-device keyword extraction">
             NANO
           </span>
+        ) : (
+          <span className="badge badge--fallback" title="Nano unavailable — using heuristic extraction">
+            HEURISTIC
+          </span>
         )}
-        <span className="badge badge--api" title="Gemini API fallback">
-          API
+        <span className="badge badge--flash" title="Gemini 2.5 Flash — contextual chat (server)">
+          FLASH
         </span>
       </div>
     </div>

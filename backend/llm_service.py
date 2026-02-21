@@ -1,19 +1,18 @@
 """
 NodeSense LLM Service
-Wraps Google Gemini API for entity extraction and contextual chat responses.
 
-RATE-LIMITING STRATEGY:
-  - Entity extraction: uses FALLBACK by default (fast, free, always available).
-    Gemini is only used for extraction if explicitly requested or if cooldown
-    has elapsed (LLM_EXTRACTION_COOLDOWN_S seconds since last call).
-  - Chat responses: always use Gemini (user-initiated, one-at-a-time).
-  - 429 errors: immediately fallback, set a cooldown penalty.
+Two-tier AI strategy:
+  - EXTRACTION: Handled by Gemini Nano on-device (in the Chrome extension).
+    If Nano is unavailable, the backend uses a fast heuristic fallback
+    (title words + content frequency analysis). No Gemini API calls for extraction.
+  - CHAT: Uses Gemini 2.5 Flash via the Gemini API for rich, contextual responses
+    empowered by GraphRAG context injection.
+  - 429 errors on chat: immediate fallback response + 60s cooldown.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import time
@@ -27,22 +26,20 @@ logger = logging.getLogger(__name__)
 
 # ── Rate Limiter State ────────────────────────────────────────────────────────
 
-LLM_EXTRACTION_COOLDOWN_S = 60  # min seconds between Gemini extraction calls
-_last_extraction_call = 0.0     # timestamp of last successful Gemini extraction
 _cooldown_until = 0.0           # if set, no Gemini calls until this timestamp
 _total_gemini_calls = 0         # counter for monitoring
 
-# ── Initialize Gemini ─────────────────────────────────────────────────────────
+# ── Initialize Gemini (for chat only) ─────────────────────────────────────────
 
 _model = None
 
 
 def _get_model():
-    """Lazy-initialize the Gemini model."""
+    """Lazy-initialize the Gemini model (used exclusively for chat)."""
     global _model
     if _model is None:
         if not settings.GEMINI_API_KEY or settings.GEMINI_API_KEY.startswith("your-"):
-            logger.warning("GEMINI_API_KEY not set — LLM calls will use fallback logic")
+            logger.warning("GEMINI_API_KEY not set — chat will use fallback responses")
             return None
         genai.configure(api_key=settings.GEMINI_API_KEY)
         _model = genai.GenerativeModel(settings.GEMINI_MODEL)
@@ -51,30 +48,14 @@ def _get_model():
 
 def _is_rate_limited() -> bool:
     """Check if we should skip Gemini calls due to rate limiting."""
-    now = time.time()
-    if now < _cooldown_until:
-        return True
-    return False
+    return time.time() < _cooldown_until
 
 
-def _is_extraction_on_cooldown() -> bool:
-    """Check if we've called Gemini for extraction too recently."""
-    now = time.time()
-    return (now - _last_extraction_call) < LLM_EXTRACTION_COOLDOWN_S
-    return _model
-
-
-# ── Entity Extraction ─────────────────────────────────────────────────────────
-
-EXTRACTION_PROMPT = """Extract {n} key topic keywords/phrases from this web page content.
-Return ONLY a JSON array of lowercase strings. No explanation.
-
-Example output: ["machine learning", "neural networks", "python", "tensorflow"]
-
-Title: {title}
-URL: {url}
-Content (truncated):
-{content}"""
+# ── Entity Extraction (Heuristic Fallback) ────────────────────────────────────
+#
+# Primary extraction is handled by Gemini Nano in the Chrome extension.
+# This fallback runs when Nano is unavailable and the extension sends
+# raw content instead of pre-extracted keywords.
 
 
 async def extract_entities(
@@ -82,55 +63,16 @@ async def extract_entities(
     title: str,
     url: str = "",
     n: int | None = None,
-    force_llm: bool = False,
 ) -> list[str]:
     """
-    Extract key topic keywords from page content.
+    Heuristic keyword extraction from page content.
 
-    Strategy:
-      - By default, uses fast fallback extraction (title + content frequency).
-      - Only calls Gemini if force_llm=True AND cooldown has elapsed.
-      - This prevents flooding the API on every single page visit.
+    This is the backend fallback for when Gemini Nano is unavailable
+    in the extension. Combines title words + content frequency analysis.
+    No API calls are made — this is purely local string processing.
     """
-    global _last_extraction_call, _cooldown_until, _total_gemini_calls
     max_kw = n or settings.MAX_KEYWORDS_PER_PAGE
     truncated = content[: settings.MAX_CONTENT_LENGTH]
-
-    # Fast path: use fallback unless LLM is explicitly requested
-    if not force_llm:
-        return _fallback_extract(title, truncated, max_kw)
-
-    # Check if Gemini is available and not rate-limited
-    model = _get_model()
-    if model is None:
-        return _fallback_extract(title, truncated, max_kw)
-    if _is_rate_limited() or _is_extraction_on_cooldown():
-        logger.debug("Gemini extraction skipped (cooldown/rate-limited)")
-        return _fallback_extract(title, truncated, max_kw)
-
-    prompt = EXTRACTION_PROMPT.format(
-        n=max_kw, title=title, url=url, content=truncated
-    )
-
-    try:
-        response = await _call_with_retry(model, prompt, max_retries=1)
-        _last_extraction_call = time.time()
-        _total_gemini_calls += 1
-        text = response.text.strip()
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        keywords = json.loads(text)
-        if isinstance(keywords, list):
-            return [str(k).lower().strip() for k in keywords[:max_kw] if k]
-    except Exception as e:
-        err_str = str(e)
-        if "429" in err_str:
-            # Rate limited — set a 60s penalty and fallback
-            _cooldown_until = time.time() + 60
-            logger.warning("Gemini 429 — entering 60s cooldown, using fallback")
-        else:
-            logger.warning(f"Gemini entity extraction failed: {e}")
-
     return _fallback_extract(title, truncated, max_kw)
 
 
@@ -192,6 +134,7 @@ async def generate_contextual_response(
 ) -> str:
     """
     Generate a chat response enriched with the user's inferred browsing context.
+    This is the ONLY function that calls the Gemini 2.5 Flash API.
     """
     global _cooldown_until, _total_gemini_calls
     model = _get_model()
@@ -240,22 +183,6 @@ def _fallback_chat(query: str, context: dict[str, Any]) -> str:
 # ── Retry Logic ───────────────────────────────────────────────────────────────
 
 
-async def _call_with_retry(model, prompt: str, max_retries: int = 1):
-    """Call model.generate_content_async with async backoff. Minimal retries."""
-    for attempt in range(max_retries + 1):
-        try:
-            return await model.generate_content_async(prompt)
-        except Exception as e:
-            if attempt == max_retries:
-                raise
-            # On 429, don't bother retrying — just raise immediately
-            if "429" in str(e):
-                raise
-            delay = min(2 ** attempt, 4)
-            logger.warning(f"Gemini retry {attempt + 1}/{max_retries} after {delay}s: {e}")
-            await asyncio.sleep(delay)
-
-
 async def _call_chat_with_retry(chat, message: str, max_retries: int = 1):
     """Call chat.send_message_async with async backoff."""
     for attempt in range(max_retries + 1):
@@ -272,11 +199,12 @@ async def _call_chat_with_retry(chat, message: str, max_retries: int = 1):
 
 
 def get_llm_stats() -> dict:
-    """Return current LLM rate-limiter stats for diagnostics."""
+    """Return current LLM stats for diagnostics."""
     now = time.time()
     return {
-        "total_gemini_calls": _total_gemini_calls,
+        "total_gemini_chat_calls": _total_gemini_calls,
         "cooldown_active": now < _cooldown_until,
         "cooldown_remaining_s": max(0, _cooldown_until - now),
-        "extraction_cooldown_remaining_s": max(0, LLM_EXTRACTION_COOLDOWN_S - (now - _last_extraction_call)),
+        "extraction_strategy": "gemini_nano_on_device (fallback: backend heuristic)",
+        "chat_model": settings.GEMINI_MODEL,
     }
