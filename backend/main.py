@@ -171,6 +171,27 @@ async def get_graph():
     return GraphStatsResponse(**data)
 
 
+@app.post("/api/graph/reset")
+async def reset_graph():
+    """Clear the entire knowledge graph and reset inference state."""
+    graph_service.graph.clear()
+    graph_service._communities = []
+    graph_service._community_labels = []
+    graph_service.save()
+
+    # Reset the workflows' cached context
+    workflows._cached_context = {
+        "task_label": "Exploring",
+        "keywords": [],
+        "confidence": 0.0,
+        "all_tasks": [],
+    }
+    workflows.inferrer = __import__("bayesian").BayesianTaskInferrer()
+
+    logger.info("Knowledge graph reset")
+    return {"status": "ok", "message": "Graph cleared"}
+
+
 @app.get("/api/stats")
 async def get_stats():
     """Return diagnostics: graph stats + LLM rate limiter status."""

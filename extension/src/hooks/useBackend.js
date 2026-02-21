@@ -112,6 +112,10 @@ export function useBackend() {
     sendMessage({ type: "GET_GRAPH" });
   }, [sendMessage]);
 
+  const resetGraph = useCallback(() => {
+    sendMessage({ type: "RESET_GRAPH" });
+  }, [sendMessage]);
+
   return {
     connected,
     context,
@@ -119,6 +123,7 @@ export function useBackend() {
     sendChat,
     requestContext,
     requestGraph,
+    resetGraph,
     onMessage,
     sendMessage,
   };

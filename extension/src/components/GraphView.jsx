@@ -81,7 +81,7 @@ function makeTextSprite(text, {
 
 // ── Component ────────────────────────────────────────────────────────────────
 
-export default function GraphView({ requestGraph, onMessage }) {
+export default function GraphView({ requestGraph, resetGraph, onMessage }) {
   const fgRef = useRef(null);
   const containerRef = useRef(null);
   const tooltipRef = useRef(null);
@@ -89,6 +89,7 @@ export default function GraphView({ requestGraph, onMessage }) {
   const [dimensions, setDimensions] = useState({ width: 400, height: 300 });
   const [tooltip, setTooltip] = useState(null); // { x, y, node?, link? }
   const [hoveredNode, setHoveredNode] = useState(null);
+  const [resetting, setResetting] = useState(false);
 
   // ── Data fetching ──────────────────────────────────────────────────────
 
@@ -104,6 +105,21 @@ export default function GraphView({ requestGraph, onMessage }) {
     });
     return cleanup;
   }, [onMessage]);
+
+  // Listen for reset confirmation
+  useEffect(() => {
+    const cleanup = onMessage("GRAPH_RESET", (msg) => {
+      setResetting(false);
+      if (msg.success) setRawData(null);
+    });
+    return cleanup;
+  }, [onMessage]);
+
+  const handleReset = useCallback(() => {
+    if (resetting) return;
+    setResetting(true);
+    resetGraph();
+  }, [resetGraph, resetting]);
 
   // ── Transform backend data → ForceGraph3D format ───────────────────────
 
@@ -247,23 +263,53 @@ export default function GraphView({ requestGraph, onMessage }) {
     fg.cameraPosition({ x: 0, y: 0, z: 250 });
   }, []);
 
-  // ── Animate star-field slow rotation ───────────────────────────────────
+  // ── Arrow key navigation ───────────────────────────────────────────────
 
   useEffect(() => {
-    const fg = fgRef.current;
-    if (!fg) return;
-    let frameId;
-    const animate = () => {
-      const scene = fg.scene();
-      const stars = scene.getObjectByName("__nodesense_stars");
-      if (stars) {
-        stars.rotation.y += 0.0001;
-        stars.rotation.x += 0.00005;
+    const container = containerRef.current;
+    if (!container) return;
+
+    // Make container focusable so it can receive key events
+    if (!container.getAttribute("tabindex")) {
+      container.setAttribute("tabindex", "0");
+      container.style.outline = "none";
+    }
+
+    const PAN_STEP = 12;
+    const handleKeyDown = (e) => {
+      const fg = fgRef.current;
+      if (!fg) return;
+      const camera = fg.camera();
+      const controls = fg.controls();
+      if (!camera || !controls) return;
+
+      let dx = 0, dy = 0;
+      switch (e.key) {
+        case "ArrowLeft":  dx = -PAN_STEP; break;
+        case "ArrowRight": dx =  PAN_STEP; break;
+        case "ArrowUp":    dy =  PAN_STEP; break;
+        case "ArrowDown":  dy = -PAN_STEP; break;
+        default: return; // don't prevent default for other keys
       }
-      frameId = requestAnimationFrame(animate);
+      e.preventDefault();
+
+      // Pan the camera in screen space
+      const target = controls.target;
+      const offset = camera.position.clone().sub(target);
+      const right = new THREE.Vector3();
+      const up = new THREE.Vector3();
+      camera.getWorldDirection(new THREE.Vector3());
+      right.crossVectors(camera.up, offset).normalize();
+      up.copy(camera.up).normalize();
+
+      const pan = right.multiplyScalar(dx).add(up.multiplyScalar(dy));
+      camera.position.add(pan);
+      target.add(pan);
+      controls.update();
     };
-    frameId = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(frameId);
+
+    container.addEventListener("keydown", handleKeyDown);
+    return () => container.removeEventListener("keydown", handleKeyDown);
   }, []);
 
   // ── Node rendering ─────────────────────────────────────────────────────
@@ -632,6 +678,16 @@ export default function GraphView({ requestGraph, onMessage }) {
         {graphData.nodes.length} nodes &nbsp;·&nbsp; {graphData.links.length}{" "}
         edges &nbsp;·&nbsp; {rawData.community_count || 0} communities
       </div>
+
+      {/* ── Reset button ── */}
+      <button
+        className="graph-view__reset"
+        onClick={handleReset}
+        disabled={resetting}
+        title="Clear all nodes and edges"
+      >
+        {resetting ? "Clearing…" : "Reset Graph"}
+      </button>
     </div>
   );
 }

@@ -329,6 +329,23 @@ async function handleSidePanelMessage(msg, port) {
       break;
     }
 
+    case "RESET_GRAPH": {
+      const result = await backendPost("/api/graph/reset", {});
+      if (result) {
+        // Clear cached context
+        await chrome.storage.session.remove("latestContext");
+        // Notify all panels
+        broadcastToSidePanel({ type: "CONTEXT_UPDATE", context: null });
+        // Send fresh (empty) graph data back
+        const graph = await backendGet("/api/graph");
+        port.postMessage({ type: "GRAPH_DATA", graph });
+        port.postMessage({ type: "GRAPH_RESET", success: true });
+      } else {
+        port.postMessage({ type: "GRAPH_RESET", success: false });
+      }
+      break;
+    }
+
     default:
       console.warn("[NodeSense] Unknown side panel message:", msg.type);
   }

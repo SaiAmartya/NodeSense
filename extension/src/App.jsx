@@ -19,6 +19,7 @@ export default function App() {
     nanoAvailable,
     sendChat,
     requestGraph,
+    resetGraph,
     onMessage,
   } = useBackend();
 
@@ -107,7 +108,7 @@ export default function App() {
       {activeTab === "context" ? (
         <ContextView context={context} />
       ) : (
-        <GraphView requestGraph={requestGraph} onMessage={onMessage} />
+        <GraphView requestGraph={requestGraph} resetGraph={resetGraph} onMessage={onMessage} />
       )}
 
       <ChatPanel
